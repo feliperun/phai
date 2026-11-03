@@ -1,3 +1,4 @@
+use crate::category_aliases::pluggy_category_alias;
 use crate::idempotency::{
     account_idempotency, category_id, pluggy_transaction_natural_idempotency,
 };
@@ -459,17 +460,14 @@ fn build_account_record(
 /// reports group correctly without a display-layer hack.
 fn normalize_pluggy_category(slug: &str) -> &str {
     match slug {
-        "groceries" | "supermarket" => "alimentacao:mercado",
-        "eating-out" | "restaurants" | "food-and-drinks" => "alimentacao:restaurantes",
-        "food-delivery" => "alimentacao:delivery",
-        "clothing" | "fashion" | "apparel" => "compras:vestuario",
-        "shopping" | "retail" | "e-commerce" => "compras",
-        "parking" => "transporte:estacionamento",
-        "sports-goods" => "lazer:esportes",
-        "hospital-clinics-and-labs" => "saude:consulta",
-        "services" => "servicos",
+        // Transfers stay visible as `transferencias`; the internal and
+        // cashback slugs are keyed on by the engine and must keep their names.
         "transfers" | "transfer-pix" => "transferencias",
-        other => other,
+        "same-person-transfer" | "cashback" => slug,
+        "services" => "servicos",
+        "income" => "receitas",
+        "salary" => "receitas:salario",
+        other => pluggy_category_alias(other).unwrap_or(other),
     }
 }
 
@@ -1603,5 +1601,108 @@ mod tests {
 
         assert_eq!(tx.amount, Decimal::new(-105559, 2));
         assert_eq!(tx.tx_type, "debit");
+    }
+
+    fn checking_registry_entry() -> AccountRegistryEntry {
+        registry_entry(None)
+    }
+
+    fn categorized_payload(
+        category: &str,
+        description: &str,
+        amount: Decimal,
+    ) -> PluggyTransactionPayload {
+        serde_json::from_value(json!({
+            "id": format!("tx-{category}"),
+            "accountId": "pluggy-cc",
+            "date": "2026-10-20",
+            "description": description,
+            "amount": amount.to_string(),
+            "type": if amount.is_sign_negative() { "DEBIT" } else { "CREDIT" },
+            "status": "POSTED",
+            "category": category
+        }))
+        .expect("deserialise payload")
+    }
+
+    #[test]
+    fn english_pluggy_categories_land_in_portuguese_taxonomy() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+        let cases = [
+            ("Gas stations", "transporte:combustivel"),
+            ("Taxi and ride-hailing", "transporte:aplicativo"),
+            ("Tax on financial operations", "financeiro:iof"),
+            ("Vehicle maintenance", "transporte:manutencao"),
+            ("Video streaming", "assinaturas:streaming"),
+            ("Healthcare", "saude"),
+            ("Tickets", "lazer:eventos"),
+        ];
+        for (pluggy_category, expected) in cases {
+            let tx = build_transaction_record(
+                categorized_payload(pluggy_category, "Loja Exemplo", Decimal::new(-5000, 2)),
+                &binding,
+                Some(&registry),
+                "test-actor",
+                &[],
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                tx.category_id.as_deref(),
+                Some(expected),
+                "Pluggy {pluggy_category:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_keyed_pluggy_categories_keep_their_ingestion_meaning() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = checking_registry_entry();
+        let cases = [
+            ("Transfers", "transferencias"),
+            ("Same person transfer", "same-person-transfer"),
+            ("Credit card payment", "credit-card-payment"),
+            ("Services", "servicos"),
+        ];
+        for (pluggy_category, expected) in cases {
+            let tx = build_transaction_record(
+                categorized_payload(pluggy_category, "Movimento Exemplo", Decimal::new(-5000, 2)),
+                &binding,
+                Some(&registry),
+                "test-actor",
+                &[],
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                tx.category_id.as_deref(),
+                Some(expected),
+                "Pluggy {pluggy_category:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn card_cashback_credit_stays_positive_after_normalization() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = credit_registry_entry(None);
+        let mut payload =
+            categorized_payload("Cashback", "Cashback exemplo", Decimal::new(1250, 2));
+        payload.tx_type = None;
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.amount, Decimal::new(1250, 2));
+        assert_eq!(tx.tx_type, "credit");
     }
 }
