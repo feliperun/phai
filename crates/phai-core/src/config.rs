@@ -32,6 +32,11 @@ pub struct AppConfig {
     /// daemon plist.
     #[serde(default)]
     pub pluggy_env_path: Option<PathBuf>,
+    /// Path to the account registry (`contas.csv`) that carries each account's
+    /// owner, type, bank and label. `sync pluggy` reads it when no
+    /// `--accounts-csv` is given.
+    #[serde(default)]
+    pub pluggy_accounts_csv_path: Option<PathBuf>,
     /// Category ids (`parent` or `parent:sub`) that are committed/fixed (rent,
     /// school, fixed bills): the web serves them with a `locked` tier so they
     /// drop out of planning — for past *and* future transactions, without a
@@ -66,6 +71,7 @@ impl Default for AppConfig {
             pluggy_start_date: None,
             pluggy_config_path: None,
             pluggy_env_path: None,
+            pluggy_accounts_csv_path: None,
             locked_categories: Vec::new(),
             account_labels: std::collections::HashMap::new(),
             llm_provider: None,
