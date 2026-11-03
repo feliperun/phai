@@ -471,6 +471,29 @@ fn normalize_pluggy_category(slug: &str) -> &str {
     }
 }
 
+/// Text the rules match against. Pluggy names the counterpart inside the
+/// description of outgoing transfers ("Transferência enviada|Fulano") but
+/// leaves incoming ones bare ("Transferência Recebida") and carries the payer
+/// in `paymentData`. Appending it in the same `|name` shape lets rules written
+/// for the named form also catch the bare one. The counterpart is the payer on
+/// credits and the receiver on debits, never the account owner.
+fn rule_match_text(raw_description: &str, payment_data: Option<&Value>, is_credit: bool) -> String {
+    if raw_description.contains('|') {
+        return raw_description.to_string();
+    }
+    let role = if is_credit { "payer" } else { "receiver" };
+    let counterpart = payment_data
+        .and_then(|data| data.get(role))
+        .and_then(|party| party.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    match counterpart {
+        Some(name) => format!("{raw_description}|{name}"),
+        None => raw_description.to_string(),
+    }
+}
+
 fn build_transaction_record(
     payload: PluggyTransactionPayload,
     binding: &PluggyBindingConfig,
@@ -497,19 +520,6 @@ fn build_transaction_record(
     // For foreign-currency charges, work in BRL from the start so rule matchers
     // that key on amount see the value the user sees on the statement.
     let account_amount = resolve_account_currency_amount(&payload);
-    let rule_application = apply_rules_with_facts(
-        &raw_description,
-        Some(account_amount),
-        Some(payload.id.as_str()),
-        category_key,
-        payload.category.is_some(),
-        rules,
-    );
-    let category_id = rule_application.category_id;
-    let category_source = rule_application.category_source;
-    let context = rule_application.context;
-    let transaction_date = parse_date(&payload.date)?;
-
     let tx_type = payload
         .tx_type
         .clone()
@@ -521,6 +531,23 @@ fn build_transaction_record(
             }
         })
         .to_ascii_lowercase();
+    let rule_text = rule_match_text(
+        &raw_description,
+        payload.extra.get("paymentData"),
+        tx_type == "credit",
+    );
+    let rule_application = apply_rules_with_facts(
+        &rule_text,
+        Some(account_amount),
+        Some(payload.id.as_str()),
+        category_key,
+        payload.category.is_some(),
+        rules,
+    );
+    let category_id = rule_application.category_id;
+    let category_source = rule_application.category_source;
+    let context = rule_application.context;
+    let transaction_date = parse_date(&payload.date)?;
 
     // Pluggy returns credit-card debits with positive amounts (debt added to card),
     // sometimes without a type field. Normalize to negative so the invariant
@@ -1625,6 +1652,19 @@ mod tests {
         .expect("deserialise payload")
     }
 
+    fn dsl_rule(rule_id: &str, body: &str) -> crate::models::RuleRecord {
+        let now = chrono::Utc::now();
+        crate::models::RuleRecord {
+            rule_id: rule_id.to_string(),
+            body: body.to_string(),
+            status: "active".to_string(),
+            actor_id: "test-actor".to_string(),
+            idempotency_key: format!("rule:{rule_id}"),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn english_pluggy_categories_land_in_portuguese_taxonomy() {
         let binding = binding("cc_acc", "pluggy-cc", None);
@@ -1704,5 +1744,123 @@ mod tests {
 
         assert_eq!(tx.amount, Decimal::new(1250, 2));
         assert_eq!(tx.tx_type, "credit");
+    }
+
+    #[test]
+    fn rules_see_payer_name_on_incoming_transfer() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = checking_registry_entry();
+        let payload: PluggyTransactionPayload = serde_json::from_value(json!({
+            "id": "tx-incoming-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-10-06",
+            "description": "Transferência Recebida",
+            "descriptionRaw": "Transferência Recebida",
+            "amount": 4321.00,
+            "type": "CREDIT",
+            "status": "POSTED",
+            "category": "Transfers",
+            "paymentData": { "payer": { "name": "Empresa Exemplo S.A." } }
+        }))
+        .expect("deserialise payload");
+        let rules = crate::rules::compile_rules(&[dsl_rule(
+            "salario_exemplo",
+            r#"if description contains "transferencia recebida|empresa exemplo" then category receitas:salario"#,
+        )])
+        .unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &rules,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.category_id.as_deref(), Some("receitas:salario"));
+        assert_eq!(tx.category_source, "rule");
+        assert_eq!(tx.raw_description, "Transferência Recebida");
+    }
+
+    #[test]
+    fn rules_do_not_see_receiver_name_when_description_already_names_it() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = checking_registry_entry();
+        let payload: PluggyTransactionPayload = serde_json::from_value(json!({
+            "id": "tx-outgoing-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-10-06",
+            "description": "Transferência enviada pelo Pix|Pessoa Exemplo da Silva",
+            "descriptionRaw": "Transferência enviada pelo Pix|Pessoa Exemplo da Silva",
+            "amount": -100.00,
+            "type": "DEBIT",
+            "status": "POSTED",
+            "category": "Transfers",
+            "paymentData": { "receiver": { "name": "Outro Nome" } }
+        }))
+        .expect("deserialise payload");
+        let rules = crate::rules::compile_rules(&[dsl_rule(
+            "outro_nome",
+            r#"if description contains "outro nome" then category moradia:servicos"#,
+        )])
+        .unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &rules,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.category_id.as_deref(), Some("transferencias"));
+    }
+
+    #[test]
+    fn rules_see_receiver_not_owner_on_bare_outgoing_transfer() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = checking_registry_entry();
+        let payload: PluggyTransactionPayload = serde_json::from_value(json!({
+            "id": "tx-outgoing-2",
+            "accountId": "pluggy-cc",
+            "date": "2026-10-06",
+            "description": "Transferência enviada",
+            "amount": -250.00,
+            "type": "DEBIT",
+            "status": "POSTED",
+            "category": "Transfers",
+            "paymentData": {
+                "payer": { "name": "Titular Exemplo" },
+                "receiver": { "name": "Prestador Exemplo" }
+            }
+        }))
+        .expect("deserialise payload");
+        let rules = crate::rules::compile_rules(&[
+            dsl_rule(
+                "titular",
+                r#"if description contains "titular exemplo" then category receitas:salario"#,
+            ),
+            dsl_rule(
+                "prestador",
+                r#"if description contains "prestador exemplo" then category moradia:servicos"#,
+            ),
+        ])
+        .unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &rules,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.category_id.as_deref(), Some("moradia:servicos"));
     }
 }
