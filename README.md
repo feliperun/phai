@@ -278,7 +278,8 @@ Beyond `auth setup`, a few optional keys in `config.toml` tune the web app (`pha
 
 | Key | Description |
 |---|---|
-| `pluggy_config_path` | Path to your `pluggy-config.json` (accounts/items). Enables the web **sync** button (`POST /api/sync`). |
+| `pluggy_config_path` | Path to your `pluggy-config.json` (accounts/items). Enables the web **sync** button (`POST /api/sync`) and is the default for `phai sync pluggy --pluggy-config`. |
+| `pluggy_accounts_csv_path` | Path to the account registry (`contas.csv`: owner, type, bank, label per account). Default for `phai sync pluggy --accounts-csv`. Accounts missing from the registry keep their stored owner/type/bank/label on sync. |
 | `pluggy_env_path` | Path to a dotenv with `PLUGGY_CLIENT_ID` / `PLUGGY_CLIENT_SECRET`, loaded into the sync subprocess at request time (creds stay off the daemon plist). |
 | `locked_categories` | List of category ids (`parent` or `parent:sub`) treated as fixed/committed (rent, school, fixed bills). They're served with a `locked` tier — dropped from planning and shown with 🔒 — for past *and* future transactions. A per-transaction tier override still wins. |
 | `account_labels` | Map of `account_id` → friendly display name, overriding the raw bank label from Pluggy (useful when a household's accounts share the same label). Surfaced in the per-account balances. |

@@ -279,10 +279,15 @@ enum SyncCommand {
 
 #[derive(Args)]
 struct SyncPluggyArgs {
-    #[arg(long, default_value = "finance/pluggy-config.json")]
-    pluggy_config: PathBuf,
-    #[arg(long, default_value = "finance/data/contas.csv")]
-    accounts_csv: PathBuf,
+    /// Pluggy account/item config. Defaults to `pluggy_config_path` from the
+    /// runtime config, then `finance/pluggy-config.json`.
+    #[arg(long)]
+    pluggy_config: Option<PathBuf>,
+    /// Account registry (owner, type, bank, label). Defaults to
+    /// `pluggy_accounts_csv_path` from the runtime config, then
+    /// `finance/data/contas.csv`.
+    #[arg(long)]
+    accounts_csv: Option<PathBuf>,
     #[arg(long)]
     fixture: Option<PathBuf>,
     #[arg(long)]
@@ -2327,6 +2332,13 @@ fn render_sync_notify_summary(
 
 /// Copy billing metadata keys from an existing account record into a freshly
 /// built Pluggy account so manual overrides survive re-syncs.
+fn keep_stored_account_identity(account: &mut AccountRecord, stored: &AccountRecord) {
+    account.owner = stored.owner.clone();
+    account.account_type = stored.account_type.clone();
+    account.bank = stored.bank.clone();
+    account.label = stored.label.clone();
+}
+
 fn merge_billing_metadata(new_meta: &mut serde_json::Value, existing_meta: &serde_json::Value) {
     for key in ["billing_closing_day", "billing_due_day"] {
         if new_meta.get(key).is_none() {
@@ -3687,6 +3699,14 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     }
 
     let (_, config) = load_config().await?;
+    let pluggy_config = args
+        .pluggy_config
+        .or_else(|| config.pluggy_config_path.clone())
+        .unwrap_or_else(|| PathBuf::from("finance/pluggy-config.json"));
+    let accounts_csv = args
+        .accounts_csv
+        .or_else(|| config.pluggy_accounts_csv_path.clone())
+        .unwrap_or_else(|| PathBuf::from("finance/data/contas.csv"));
     let store = open_store(&config).await?;
     run_migrations(store.as_ref(), &config).await?;
     let compiled_rules = compile_rules(&store.active_rules().await?)?;
@@ -3702,8 +3722,8 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
     let (mut accounts, transactions, rebinds) = sync_pluggy(SyncPluggyParams {
         actor_id: &config.actor_id,
-        pluggy_config_path: &args.pluggy_config,
-        accounts_csv_path: Some(&args.accounts_csv),
+        pluggy_config_path: &pluggy_config,
+        accounts_csv_path: Some(&accounts_csv),
         fixture_path: args.fixture.as_deref(),
         from_override: Some(&effective_from),
         to_date: &to,
@@ -3722,15 +3742,21 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         .await?;
     // Merge billing metadata from existing accounts so that manually set
     // billing_closing_day / billing_due_day survive Pluggy re-syncs (which
-    // always rebuild metadata_json from the API payload).
+    // always rebuild metadata_json from the API payload). Accounts missing
+    // from the registry also keep their stored owner/type/bank/label instead
+    // of falling back to Pluggy's generic values.
+    let registry = phai_core::legacy::load_account_registry(&accounts_csv)?;
     if let Ok(existing_accounts) = store.get_accounts().await {
-        let existing_map: BTreeMap<&str, &serde_json::Value> = existing_accounts
+        let existing_map: BTreeMap<&str, &AccountRecord> = existing_accounts
             .iter()
-            .map(|a| (a.account_id.as_str(), &a.metadata_json))
+            .map(|a| (a.account_id.as_str(), a))
             .collect();
         for acct in &mut accounts {
-            if let Some(existing_meta) = existing_map.get(acct.account_id.as_str()) {
-                merge_billing_metadata(&mut acct.metadata_json, existing_meta);
+            if let Some(existing) = existing_map.get(acct.account_id.as_str()) {
+                merge_billing_metadata(&mut acct.metadata_json, &existing.metadata_json);
+                if !registry.contains_key(&acct.account_id) {
+                    keep_stored_account_identity(acct, existing);
+                }
             }
         }
     }

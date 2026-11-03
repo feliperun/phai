@@ -6997,3 +6997,101 @@ async fn serve_baseline_discard_and_end_template_endpoints() {
         "discard + end-template writes must be audited, got {audit_actions}"
     );
 }
+
+fn account_identity(data_dir: &Path, account_id: &str) -> (String, String, String, String) {
+    let conn = Connection::open(data_dir.join("phai.local.db")).expect("open db");
+    conn.query_row(
+        "SELECT owner, account_type, bank, label FROM accounts WHERE account_id = ?1",
+        [account_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .expect("account row")
+}
+
+#[test]
+fn sync_without_registry_keeps_curated_account_identity() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+    let curated = account_identity(&data_dir, "primary_checking");
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(temp.path().join("pluggy-config.json"))
+            .arg("--accounts-csv")
+            .arg(temp.path().join("missing-contas.csv"))
+            .arg("--fixture")
+            .arg(repo_root().join("examples/pluggy_fixture.json"))
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    assert_eq!(account_identity(&data_dir, "primary_checking"), curated);
+}
+
+#[test]
+fn sync_reads_pluggy_paths_from_runtime_config() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    let pluggy_config = temp
+        .path()
+        .join("runtime-pluggy")
+        .join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{
+  "syncStartDate": "2026-03-01",
+  "accounts": [
+    { "id": "primary_checking", "pluggyAccountId": "fixture-checking" },
+    { "id": "shared_credit", "pluggyAccountId": "fixture-credit" }
+  ]
+}"#,
+    );
+    let accounts_csv = temp.path().join("runtime-pluggy").join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\nprimary_checking,primary,checking,fintech,Primary Checking,fixture-checking,item-1,,\nshared_credit,secondary,credit,fintech,Shared Credit Card,fixture-credit,item-2,3,10\n",
+    );
+    let config_file = config_dir.join("config.toml");
+    // Top-level keys must precede the `[account_labels]` table `auth setup` writes.
+    let config = format!(
+        "pluggy_config_path = {:?}\npluggy_accounts_csv_path = {:?}\n{}",
+        pluggy_config.display().to_string(),
+        accounts_csv.display().to_string(),
+        fs::read_to_string(&config_file).expect("config.toml")
+    );
+    write_file(&config_file, &config);
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--fixture")
+            .arg(repo_root().join("examples/pluggy_fixture.json"))
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("- transactions: 4"));
+
+    let (owner, _, bank, label) = account_identity(&data_dir, "primary_checking");
+    assert_eq!(
+        (owner.as_str(), bank.as_str(), label.as_str()),
+        ("primary", "fintech", "Primary Checking")
+    );
+}
