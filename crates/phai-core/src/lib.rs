@@ -1,4 +1,5 @@
 pub mod cashflow;
+pub mod category_aliases;
 pub mod compat;
 pub mod config;
 pub mod enrichment;

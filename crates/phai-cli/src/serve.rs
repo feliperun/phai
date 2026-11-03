@@ -76,81 +76,7 @@ use crate::{
     all_transactions_for_review, apply_human_review, load_config, parse_month_ref,
     review_human_rows, HumanReviewPatch, ReviewFilters, ReviewHumanKind,
 };
-
-const LEGACY_WEB_CATEGORY_ALIASES: &[(&str, &str)] = &[
-    ("airport-and-airlines", "lazer:viagem"),
-    ("airlines", "lazer:viagem"),
-    ("accomodation", "lazer:viagem"),
-    ("automotive", "transporte"),
-    ("bank", "financeiro"),
-    ("bank-fees", "financeiro:taxas"),
-    ("cashback", "receitas:cashback"),
-    ("digital-services", "compras:servicos-digitais"),
-    ("donations", "outros"),
-    ("electricity", "moradia:energia"),
-    ("electronics", "compras:eletronicos"),
-    ("gambling", "lazer:apostas"),
-    ("gaming", "lazer"),
-    ("gas", "moradia:gas"),
-    ("gas-stations", "transporte:combustivel"),
-    ("groceries", "alimentacao:mercado"),
-    ("supermarket", "alimentacao:mercado"),
-    ("eating-out", "alimentacao:restaurantes"),
-    ("restaurants", "alimentacao:restaurantes"),
-    ("food-and-drinks", "alimentacao:restaurantes"),
-    ("food-and-beverages", "alimentacao:restaurantes"),
-    ("food-delivery", "alimentacao:delivery"),
-    ("gyms-and-fitness-centers", "saude:atividade-fisica"),
-    ("houseware", "compras:casa"),
-    ("housing", "moradia"),
-    ("insurance", "financeiro:seguros"),
-    ("kids-and-toys", "lazer:criancas"),
-    ("clothing", "compras:vestuario"),
-    ("fashion", "compras:vestuario"),
-    ("apparel", "compras:vestuario"),
-    ("shopping", "compras"),
-    ("retail", "compras"),
-    ("e-commerce", "compras"),
-    ("online-shopping", "compras:e-commerce"),
-    ("office-supplies", "compras"),
-    ("parking", "transporte:estacionamento"),
-    ("sports-goods", "lazer:esportes"),
-    ("hospital-clinics-and-labs", "saude:consulta"),
-    ("optometry", "saude:saude-visual"),
-    ("pharmacy", "saude:farmacia"),
-    ("health", "saude"),
-    ("healthcare", "saude"),
-    ("school", "educacao"),
-    ("online-courses", "educacao:cursos"),
-    ("transport", "transporte"),
-    ("transportation", "transporte"),
-    ("ride-sharing", "transporte:aplicativo"),
-    ("taxi-and-ride-hailing", "transporte:aplicativo"),
-    ("public-transportation", "transporte:publico"),
-    ("tolls-and-in-vehicle-payment", "transporte:pedagio"),
-    ("vehicle-maintenance", "transporte:manutencao"),
-    ("education", "educacao"),
-    ("bookstore", "educacao"),
-    ("entertainment", "lazer"),
-    ("leisure", "lazer"),
-    ("sports-and-fitness", "saude:fitness"),
-    ("travel", "lazer:viagem"),
-    ("bills-and-utilities", "moradia:contas"),
-    ("utilities", "moradia:contas"),
-    ("telecommunications", "moradia:contas"),
-    ("rent", "moradia:aluguel"),
-    ("personal-care", "pessoal:cuidado-fisico"),
-    ("personal", "pessoal"),
-    ("subscriptions", "assinaturas"),
-    ("video-streaming", "assinaturas:streaming"),
-    ("same-person-transfer", "transfer-internal"),
-    ("transfers", "transfer-internal"),
-    ("transfer-pix", "transfer-internal"),
-    ("tax-on-financial-operations", "financeiro:iof"),
-    ("income", "renda"),
-    ("salary", "renda"),
-    ("pets", "lazer:pets"),
-];
+use phai_core::category_aliases::pluggy_category_alias;
 
 const WEB_CANONICAL_CATEGORY_FAMILIES: &[&str] = &[
     "alimentacao",
@@ -186,10 +112,7 @@ fn canonical_web_category_id(category_id: &str) -> String {
         return String::new();
     }
     let normalized = raw.to_lowercase().replace([' ', '_'], "-");
-    if let Some(canonical) = LEGACY_WEB_CATEGORY_ALIASES
-        .iter()
-        .find_map(|(alias, canonical)| (*alias == normalized).then_some(*canonical))
-    {
+    if let Some(canonical) = pluggy_category_alias(&normalized) {
         return canonical.to_string();
     }
     if is_web_canonical_category(&normalized) {
