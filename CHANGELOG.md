@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.42.2](https://github.com/feliperun/phai/compare/v5.42.1...v5.42.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **views:** treat an OFX row one day off its Pluggy twin as a duplicate ([aa98793](https://github.com/feliperun/phai/commit/aa98793f2fd5dcbc28819909bedee0aefdb0a501))
+
 ## [5.42.1](https://github.com/feliperun/phai/compare/v5.42.0...v5.42.1) (2026-11-04)
 
 
