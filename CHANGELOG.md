@@ -1,5 +1,15 @@
 # Changelog
 
+## [5.41.1](https://github.com/feliperun/phai/compare/v5.41.0...v5.41.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **cli:** anchor `report cards --month` on the requested cycle ([07f1832](https://github.com/feliperun/phai/commit/07f18320f63be452e59fc5ee19b17e84a1f70e9e))
+* **pluggy:** let rules see the payer name on incoming transfers ([98b9d68](https://github.com/feliperun/phai/commit/98b9d68663fc55b3bba8d88cdc71b2fb58b81492))
+* **pluggy:** store English Pluggy categories under the Portuguese taxonomy ([67f2e66](https://github.com/feliperun/phai/commit/67f2e66b6b9e6123e12ba476fbe3d48d97908524))
+* **sync:** read Pluggy paths from runtime config and keep account identity ([afd4b0c](https://github.com/feliperun/phai/commit/afd4b0cc3f3543899577b8e36d9f2e94ae2171e8))
+
 ## [5.41.0](https://github.com/phai-run/phai/compare/v5.40.0...v5.41.0) (2026-07-07)
 
 
