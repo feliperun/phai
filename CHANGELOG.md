@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.42.0](https://github.com/feliperun/phai/compare/v5.41.1...v5.42.0) (2026-11-04)
+
+
+### Features
+
+* **installments:** carry a purchase's identity across its installments ([305a71b](https://github.com/feliperun/phai/commit/305a71b0bb688273dc70c2e1aa861016f36c9f69))
+
 ## [5.41.1](https://github.com/feliperun/phai/compare/v5.41.0...v5.41.1) (2026-11-04)
 
 
