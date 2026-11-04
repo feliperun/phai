@@ -3222,6 +3222,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn reportable_prefers_posted_installment_over_projected_twin() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        let installment = |id: &str, day: u32, desc: &str, cents: i64, bill: Option<&str>| {
+            let mut row = tx(id, "pluggy", desc, Decimal::new(cents, 2));
+            row.transaction_date = NaiveDate::from_ymd_opt(2026, 8, day).unwrap();
+            let marker = desc.rsplit(' ').next().unwrap();
+            let (k, n) = marker.split_once('/').unwrap();
+            row.metadata_json = serde_json::json!({ "raw": { "creditCardMetadata": {
+                "installmentNumber": k.parse::<u32>().unwrap(),
+                "totalInstallments": n.parse::<u32>().unwrap(),
+                "billId": bill,
+            }}});
+            row
+        };
+        store
+            .upsert_transactions(&[
+                installment("projected", 17, "Loja Exemplo 4/6", -36283, None),
+                installment("posted", 3, "Loja Exemplo 4/6", -36283, Some("bill-1")),
+                installment("lonely", 20, "Outra Loja 1/3", -10000, None),
+            ])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        let august = rows
+            .iter()
+            .find(|row| row.month_ref == "2026-08")
+            .expect("august cashflow");
+
+        assert_eq!(august.expenses, Decimal::new(46283, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn plan_scenario_and_changes_round_trip() {
         use crate::models::{PlanChangeRecord, PlanScenarioRecord};
 

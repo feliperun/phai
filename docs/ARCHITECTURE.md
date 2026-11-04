@@ -190,7 +190,9 @@ All cash-flow/spend reporting — the CLI, the cashflow chart, and the web UI �
 transactions                       raw rows (Pluggy / OFX / legacy / manual)
   └─ v_transactions_effective      splits expansion + display labels
        └─ v_transactions_reportable  dedup: drops legacy-manual + ofx rows
-            │                          shadowed by a Pluggy row (anti-joins)
+            │                          shadowed by a Pluggy row, and Pluggy's
+            │                          projected installment once its posted
+            │                          bill line exists (anti-joins)
             └─ v_transactions_cashbasis  + canonical cash_month: a card purchase
                  │                         falls in the month its bill is PAID,
                  │                         from billing_closing_day/billing_due_day
