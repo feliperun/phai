@@ -20,6 +20,13 @@ fn envs<'a>(cmd: &'a mut Command, config_dir: &Path, data_dir: &Path) -> &'a mut
         // subsequent assertions to run against an old release artifact
         // and producing false negatives.
         .env("FINANCE_OS_NO_AUTO_UPDATE", "1")
+        // Keep post-sync enrichment offline and deterministic even when the
+        // developer's shell carries real LLM credentials.
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OLLAMA_BASE_URL")
 }
 
 fn write_file(path: &Path, content: &str) {
@@ -34,6 +41,13 @@ fn repo_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("repo root")
+}
+
+/// `--days` window that still reaches the fixed March 2026 fixture rows, so
+/// report assertions do not expire as the calendar moves on.
+fn days_covering_fixture() -> String {
+    let fixture_start = chrono::NaiveDate::from_ymd_opt(2026, 3, 1).expect("fixture start");
+    ((Utc::now().date_naive() - fixture_start).num_days() + 1).to_string()
 }
 
 fn setup_local_auth_migrate(config_dir: &Path, data_dir: &Path) {
@@ -351,7 +365,7 @@ fn milestone_zero_local_sync_and_report() {
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("120"),
+            .arg(days_covering_fixture()),
         &config_dir,
         &data_dir,
     )
@@ -365,7 +379,7 @@ fn milestone_zero_local_sync_and_report() {
             .arg("report")
             .arg("daily-pulse")
             .arg("--days")
-            .arg("120")
+            .arg(days_covering_fixture())
             .arg("--raw"),
         &config_dir,
         &data_dir,
@@ -786,7 +800,7 @@ fn mutating_commands_feed_reporting_views() {
             .arg("report")
             .arg("data-health")
             .arg("--days")
-            .arg("120")
+            .arg(days_covering_fixture())
             .arg("--json"),
         &config_dir,
         &data_dir,
