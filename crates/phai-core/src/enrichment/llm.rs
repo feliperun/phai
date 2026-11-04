@@ -1,6 +1,6 @@
 //! LLM provider selection and enrichment call.
 //!
-//! rig-core 0.6 ships native providers for Anthropic and OpenAI; for
+//! rig-core ships native providers for Anthropic and OpenAI; for
 //! Deepseek and Ollama we use the OpenAI provider with a custom
 //! `base_url` (both expose OpenAI-compatible endpoints).
 //!
@@ -20,7 +20,7 @@
 //!   - Anthropic / OpenAI / Deepseek → try `Extractor<EnrichmentResult>`
 //!     (tool calling).
 //!   - Ollama → completion API + manual JSON parsing (Ollama's
-//!     tool-calling story in rig 0.6 is unreliable).
+//!     tool-calling through rig was unreliable as of rig 0.6).
 //!   - On parse failure: greedy-regex `{…}` extraction and one retry
 //!     with `\n\nRETURN ONLY VALID JSON MATCHING THE SCHEMA.` appended.
 //!   - Both failures bubble up as `anyhow::Error`.
