@@ -207,6 +207,7 @@ phai tx pending              List uncategorized transactions
 phai tx pending-human        List missing description, merchant, or purpose fields
 phai tx review-human         Headless review of human fields and category (--json/--summary/--transaction-id), with queue filters
 phai tx merge                Merge a duplicate manual transaction into its canonical Pluggy row
+phai tx propagate-installments  Name installments from a named sibling of the same purchase (also runs after sync; --dry-run)
 phai tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 phai tx split <subcommand>   Split a transaction into multiple lines
 phai forecast upsert         Create or update a forecast entry

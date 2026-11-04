@@ -35,6 +35,7 @@ mod cashflow_chart;
 mod enrich;
 mod forecast_cmd;
 mod human_format;
+mod installment_anatomy;
 mod mcp;
 mod pulse;
 mod scenario_cmd;
@@ -1428,6 +1429,10 @@ enum TxCommand {
     /// Propagate human-curated description and purpose from prior
     /// same-merchant transactions to those that are still missing them.
     ReplicateAnatomy(ReplicateAnatomyArgs),
+    /// Fill installments that arrived without a name from a named installment
+    /// of the same purchase (description with its own k/n, merchant, purpose,
+    /// and a hand-picked category). Also runs after every sync.
+    PropagateInstallments(installment_anatomy::PropagateInstallmentsArgs),
 }
 
 #[derive(Subcommand)]
@@ -3267,6 +3272,9 @@ async fn run_command(command: Option<Commands>) -> Result<()> {
             },
             TxCommand::Enrich(args) => tx_enrich(args).await,
             TxCommand::ReplicateAnatomy(args) => tx_replicate_anatomy(args).await,
+            TxCommand::PropagateInstallments(args) => {
+                installment_anatomy::tx_propagate_installments(args).await
+            }
         },
         Some(Commands::Forecast { command }) => match command {
             ForecastCommand::Upsert(args) => forecast_upsert(*args).await,
@@ -3928,6 +3936,20 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
     println!("- categories: {}", categories.len());
     println!("- actor: {}", config.actor_id);
     println!("- backend: {:?}", config.effective_backend());
+
+    // Name new installments from their already-named siblings before the
+    // LLM enrichment below gets a chance to guess. Non-fatal, like enrichment.
+    match installment_anatomy::propagate_installment_anatomy(
+        store.as_ref(),
+        &config.actor_id,
+        installment_anatomy::DEFAULT_LOOKBACK_MONTHS,
+        false,
+    )
+    .await
+    {
+        Ok(fills) => println!("Parcelas identificadas pela compra: {}", fills.len()),
+        Err(err) => eprintln!("aviso: propagação de parcelas falhou: {err:#}"),
+    }
 
     // Phase 5 — post-sync enrichment hook. Non-fatal: any failure
     // inside `enrich_after_sync` is logged via eprintln and the sync

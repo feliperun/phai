@@ -287,6 +287,113 @@ pub fn group_into_chains(transactions: &[TransactionRecord]) -> Vec<InstallmentC
     chains
 }
 
+/// Identity to copy onto an installment that arrived without it, taken from a
+/// sibling installment of the same purchase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallmentAnatomyFill {
+    pub transaction_id: String,
+    pub donor_transaction_id: String,
+    pub description: Option<String>,
+    pub merchant_name: Option<String>,
+    pub purpose: Option<String>,
+    /// Set only when the donor's category was chosen by hand and the target's
+    /// was not, so every installment of a purchase lands in the same category.
+    pub category_id: Option<String>,
+}
+
+/// For each installment chain with a named installment, fill the siblings
+/// that are still missing a description, merchant or purpose. The
+/// description keeps the donor's wording with the target's own `k/n`.
+/// Existing values are never overwritten.
+pub fn installment_anatomy_fills(
+    transactions: &[TransactionRecord],
+) -> Vec<InstallmentAnatomyFill> {
+    let mut fills = Vec::new();
+    for chain in group_into_chains(transactions) {
+        let Some(donor) = chain
+            .installments
+            .iter()
+            .rev()
+            .find(|tx| non_empty(tx.description.as_deref()).is_some())
+        else {
+            continue;
+        };
+        let donor_description = non_empty(donor.description.as_deref()).unwrap_or_default();
+        let base = installment_base_name(donor_description);
+        for target in &chain.installments {
+            if target.transaction_id == donor.transaction_id {
+                continue;
+            }
+            let description = match (
+                non_empty(target.description.as_deref()),
+                parse_installment_description(&target.raw_description),
+            ) {
+                (None, Some(marker)) => Some(format!("{base} {}/{}", marker.current, marker.total)),
+                _ => None,
+            };
+            let merchant_name = missing_from(
+                target.merchant_name.as_deref(),
+                donor.merchant_name.as_deref(),
+            );
+            let purpose = missing_from(target.purpose.as_deref(), donor.purpose.as_deref());
+            let category_id = (donor.category_source == "manual"
+                && target.category_source != "manual"
+                && donor.category_id.is_some()
+                && target.category_id != donor.category_id)
+                .then(|| donor.category_id.clone())
+                .flatten();
+            if description.is_none()
+                && merchant_name.is_none()
+                && purpose.is_none()
+                && category_id.is_none()
+            {
+                continue;
+            }
+            fills.push(InstallmentAnatomyFill {
+                transaction_id: target.transaction_id.clone(),
+                donor_transaction_id: donor.transaction_id.clone(),
+                description,
+                merchant_name,
+                purpose,
+                category_id,
+            });
+        }
+    }
+    fills
+}
+
+/// A person's name for an installment without its `k/n`, whether written as
+/// a trailing marker ("Bike 2/7") or in parentheses ("Conserto (1/3)").
+fn installment_base_name(description: &str) -> String {
+    if let Some(marker) = parse_installment_description(description) {
+        return marker.base_description;
+    }
+    let trimmed = description.trim_end();
+    if let Some(open) = trimmed.strip_suffix(')').and_then(|rest| rest.rfind('(')) {
+        let inner = &trimmed[open + 1..trimmed.len() - 1];
+        let is_marker = inner.split_once('/').is_some_and(|(k, n)| {
+            [k, n]
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        });
+        if is_marker {
+            return trimmed[..open].trim_end().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn missing_from(target: Option<&str>, donor: Option<&str>) -> Option<String> {
+    match (non_empty(target), non_empty(donor)) {
+        (None, Some(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 /// Sort: released_next_month descending, then projected_end ascending, then base_description.
 fn sort_chains(chains: &mut [InstallmentChain]) {
     chains.sort_by(|a, b| {
@@ -875,5 +982,148 @@ mod tests {
         // SHORT ITEM 5/6 has remaining=1 => released_next_month=true, should be first
         assert_eq!(chains[0].base_description, "SHORT ITEM");
         assert!(chains[0].released_next_month);
+    }
+
+    // ── installment_anatomy_fills tests ────────────────────────────────────
+
+    fn named(
+        mut tx: TransactionRecord,
+        description: &str,
+        merchant: &str,
+        purpose: &str,
+    ) -> TransactionRecord {
+        tx.description = Some(description.to_string());
+        tx.merchant_name = Some(merchant.to_string());
+        tx.purpose = Some(purpose.to_string());
+        tx
+    }
+
+    fn categorized(mut tx: TransactionRecord, category: &str, source: &str) -> TransactionRecord {
+        tx.category_id = Some(category.to_string());
+        tx.category_source = source.to_string();
+        tx
+    }
+
+    #[test]
+    fn anatomy_fills_copy_sibling_identity_with_own_installment_number() {
+        let donor = named(
+            make_tx("t2", "card", "2026-05-06", "LOJA EXEMPLO 2/4"),
+            "Bicicleta infantil 2/4",
+            "Loja Exemplo",
+            "Presente de aniversário",
+        );
+        let txs = vec![
+            make_tx("t1", "card", "2026-04-06", "LOJA EXEMPLO 1/4"),
+            donor,
+            make_tx("t3", "card", "2026-06-06", "LOJA EXEMPLO 3/4"),
+        ];
+
+        let fills = installment_anatomy_fills(&txs);
+
+        assert_eq!(fills.len(), 2);
+        let third = fills.iter().find(|f| f.transaction_id == "t3").unwrap();
+        assert_eq!(third.description.as_deref(), Some("Bicicleta infantil 3/4"));
+        assert_eq!(third.merchant_name.as_deref(), Some("Loja Exemplo"));
+        assert_eq!(third.purpose.as_deref(), Some("Presente de aniversário"));
+        assert_eq!(third.donor_transaction_id, "t2");
+        let first = fills.iter().find(|f| f.transaction_id == "t1").unwrap();
+        assert_eq!(first.description.as_deref(), Some("Bicicleta infantil 1/4"));
+    }
+
+    #[test]
+    fn anatomy_fills_never_overwrite_and_skip_unnamed_chains() {
+        let mut partial = make_tx("t3", "card", "2026-06-06", "LOJA EXEMPLO 3/4");
+        partial.purpose = Some("Já explicado".to_string());
+        let txs = vec![
+            named(
+                make_tx("t2", "card", "2026-05-06", "LOJA EXEMPLO 2/4"),
+                "Bicicleta infantil 2/4",
+                "Loja Exemplo",
+                "Presente de aniversário",
+            ),
+            partial,
+            make_tx("u1", "card", "2026-04-10", "OUTRA LOJA 1/3"),
+            make_tx("u2", "card", "2026-05-10", "OUTRA LOJA 2/3"),
+        ];
+
+        let fills = installment_anatomy_fills(&txs);
+
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].transaction_id, "t3");
+        assert_eq!(fills[0].purpose, None);
+        assert_eq!(
+            fills[0].description.as_deref(),
+            Some("Bicicleta infantil 3/4")
+        );
+    }
+
+    #[test]
+    fn anatomy_fills_carry_only_manual_categories() {
+        let donor = categorized(
+            named(
+                make_tx("t1", "card", "2026-04-06", "LOJA EXEMPLO 1/3"),
+                "Presente 1/3",
+                "Loja Exemplo",
+                "Presente",
+            ),
+            "compras:presentes",
+            "manual",
+        );
+        let ruled = categorized(
+            make_tx("t2", "card", "2026-05-06", "LOJA EXEMPLO 2/3"),
+            "compras:e-commerce",
+            "rule",
+        );
+        let kept_manual = categorized(
+            make_tx("t3", "card", "2026-06-06", "LOJA EXEMPLO 3/3"),
+            "outros:geral",
+            "manual",
+        );
+        let rule_donor = categorized(
+            named(
+                make_tx("r1", "card", "2026-04-15", "MERCADO X 1/2"),
+                "Feira 1/2",
+                "Mercado X",
+                "Feira",
+            ),
+            "alimentacao:mercado",
+            "rule",
+        );
+        let rule_target = categorized(
+            make_tx("r2", "card", "2026-05-15", "MERCADO X 2/2"),
+            "compras",
+            "pluggy",
+        );
+
+        let fills =
+            installment_anatomy_fills(&[donor, ruled, kept_manual, rule_donor, rule_target]);
+
+        let by_id = |id: &str| fills.iter().find(|f| f.transaction_id == id).unwrap();
+        assert_eq!(
+            by_id("t2").category_id.as_deref(),
+            Some("compras:presentes")
+        );
+        assert_eq!(by_id("t3").category_id, None);
+        assert_eq!(by_id("r2").category_id, None);
+    }
+
+    #[test]
+    fn anatomy_fills_drop_parenthesized_marker_from_donor_name() {
+        let txs = vec![
+            named(
+                make_tx("p1", "card", "2026-04-06", "ASSISTENCIA X 1/3"),
+                "Conserto relógio - OS 123 (1/3)",
+                "Assistência X",
+                "Conserto",
+            ),
+            make_tx("p2", "card", "2026-05-06", "ASSISTENCIA X 2/3"),
+        ];
+
+        let fills = installment_anatomy_fills(&txs);
+
+        assert_eq!(
+            fills[0].description.as_deref(),
+            Some("Conserto relógio - OS 123 2/3")
+        );
     }
 }

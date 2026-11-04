@@ -209,6 +209,8 @@ Until ported, the CLI surfaces a clear unsupported-backend error on local for: `
 
 `installments.rs` detects installment chains in transaction descriptions (`PARC 2/12`, `1 de 6`, Pluggy structured markers). A chain groups related rows so reports can show "X de Y" and project the chain's end. Detection happens at sync time and during description enrichment.
 
+Chains also carry a purchase's identity: once one installment is named, `installment_anatomy_fills` copies its description (with each row's own `k/n`), merchant and purpose to the siblings still missing them, plus the category when the donor's was chosen by hand. The sync runs it right after ingestion, before LLM enrichment, and `phai tx propagate-installments` runs it on demand. Existing values are never overwritten.
+
 ## Planning Scenarios (ADR-0037)
 
 A scenario (`plan_scenario`) is a named set of typed deltas (`plan_change`:
