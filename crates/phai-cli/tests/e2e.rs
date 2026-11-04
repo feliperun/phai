@@ -306,7 +306,7 @@ fn review_human_queue_filters_by_month_account_category_and_merchant() {
             .arg("--account-id")
             .arg("shared_credit")
             .arg("--category")
-            .arg("gas-stations")
+            .arg("transporte:combustivel")
             .arg("--merchant")
             .arg("posto"),
         &config_dir,
@@ -323,7 +323,7 @@ fn review_human_queue_filters_by_month_account_category_and_merchant() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["transactionId"], "pluggy-fixture-003");
     assert_eq!(rows[0]["accountId"], "shared_credit");
-    assert_eq!(rows[0]["categoryId"], "gas-stations");
+    assert_eq!(rows[0]["categoryId"], "transporte:combustivel");
 }
 
 #[test]
