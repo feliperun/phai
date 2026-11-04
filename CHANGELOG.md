@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.42.1](https://github.com/feliperun/phai/compare/v5.42.0...v5.42.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **views:** count a card installment once when Pluggy also sends its bill line ([9ffb27f](https://github.com/feliperun/phai/commit/9ffb27f78dca535fc62aebefb3823fb214b08d5c))
+
 ## [5.42.0](https://github.com/feliperun/phai/compare/v5.41.1...v5.42.0) (2026-11-04)
 
 
