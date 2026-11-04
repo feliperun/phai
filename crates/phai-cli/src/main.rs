@@ -9520,11 +9520,16 @@ async fn report_cards(args: CardsArgs, format: ReportOutputFormat) -> Result<()>
 
     // Fetch a wide window so we capture full bill cycles regardless of where
     // they straddle calendar months. 90 days covers the most-recent-closed
-    // bill (~30d) plus the cycle before it as fallback.
-    let window_end = today;
-    let window_start = today
+    // bill (~30d) plus the cycle before it as fallback. A `--month` request
+    // anchors the window on that cycle (through the following month, where
+    // its payment lands) so older bills are not cut off by today's window.
+    let window_end = match mode {
+        CardsMode::Specific => shift_month(parse_month_ref(&target_month)?, 2)? - Duration::days(1),
+        CardsMode::Closed | CardsMode::Next => today,
+    };
+    let window_start = window_end
         .checked_sub_signed(Duration::days(90))
-        .unwrap_or(today);
+        .unwrap_or(window_end);
     let mut all_rows: Vec<CardClosedTransactionRow> = Vec::new();
     // Existing storage API is month-scoped; iterate over months in the window.
     let mut cursor = window_start;
