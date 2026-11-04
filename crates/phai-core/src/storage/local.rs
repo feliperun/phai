@@ -3222,6 +3222,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn cashflow_reportable_dedupes_ofx_shifted_one_day_from_pluggy() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path().join("phai.db"));
+        let store = LocalStore::new(config.clone()).unwrap();
+        run_migrations(&store, &config).await.unwrap();
+
+        let mut ofx_next_day = tx("ofx-dupe", "ofx", "Compra Exemplo", Decimal::new(-3400, 2));
+        ofx_next_day.transaction_date = NaiveDate::from_ymd_opt(2026, 5, 11).unwrap();
+        let mut ofx_far = tx("ofx-far", "ofx", "Compra Exemplo", Decimal::new(-3400, 2));
+        ofx_far.transaction_date = NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
+        store
+            .upsert_transactions(&[
+                tx("pluggy", "pluggy", "Compra Exemplo", Decimal::new(-3400, 2)),
+                ofx_next_day,
+                ofx_far,
+            ])
+            .await
+            .unwrap();
+
+        let rows = store.cashflow_reportable().await.unwrap();
+        let may = rows
+            .iter()
+            .find(|row| row.month_ref == "2026-05")
+            .expect("may cashflow");
+
+        assert_eq!(may.expenses, Decimal::new(6800, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn reportable_prefers_posted_installment_over_projected_twin() {
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(dir.path().join("phai.db"));
