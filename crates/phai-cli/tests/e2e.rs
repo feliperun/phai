@@ -7095,3 +7095,141 @@ fn sync_reads_pluggy_paths_from_runtime_config() {
         ("primary", "fintech", "Primary Checking")
     );
 }
+
+#[test]
+fn sync_names_new_installment_from_named_sibling() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+
+    let pluggy_config = temp.path().join("pluggy-config.json");
+    write_file(
+        &pluggy_config,
+        r#"{ "accounts": [ { "id": "cc-chain", "pluggyAccountId": "pluggy-cc-chain" } ] }"#,
+    );
+    let accounts_csv = temp.path().join("contas.csv");
+    write_file(
+        &accounts_csv,
+        "id,owner,type,bank,label,pluggy_account_id,pluggy_item_id,billing_closing_day,billing_due_day\ncc-chain,primary,credit,fintech,Chain Card,pluggy-cc-chain,item-c,3,10\n",
+    );
+    // Two consecutive months on day 6, always in the past and one month apart.
+    let this_month = Utc::now().date_naive().with_day(1).expect("first day");
+    let first = (this_month - Duration::days(40))
+        .with_day(6)
+        .expect("day 6");
+    let second = (this_month - Duration::days(10))
+        .with_day(6)
+        .expect("day 6");
+    let installment = |id: &str, date: chrono::NaiveDate, marker: &str| {
+        format!(
+            r#"{{ "id": "{id}", "accountId": "pluggy-cc-chain", "date": "{date}", "description": "Loja Exemplo",
+                 "descriptionRaw": "Loja Exemplo {marker}", "amount": -120.00, "type": "debit", "status": "posted" }}"#
+        )
+    };
+    let fixture = |transactions: Vec<String>| {
+        format!(
+            r#"{{ "accounts": [ {{ "id": "pluggy-cc-chain", "item_id": "item-c", "name": "Chain Card", "type": "credit",
+                 "status": "ACTIVE", "balance": -240.00, "currency_code": "BRL" }} ],
+                 "transactions": [ {} ] }}"#,
+            transactions.join(",")
+        )
+    };
+    let sync = |fixture_path: &Path| {
+        envs(
+            cargo_bin()
+                .arg("sync")
+                .arg("pluggy")
+                .arg("--pluggy-config")
+                .arg(&pluggy_config)
+                .arg("--accounts-csv")
+                .arg(&accounts_csv)
+                .arg("--fixture")
+                .arg(fixture_path)
+                .arg("--from")
+                .arg(first.to_string())
+                .arg("--no-enrich")
+                .arg("--no-forecast-refresh"),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    };
+
+    let first_fixture = temp.path().join("first.json");
+    write_file(
+        &first_fixture,
+        &fixture(vec![installment("chain-1", first, "1/3")]),
+    );
+    sync(&first_fixture);
+    envs(
+        cargo_bin()
+            .args(["tx", "categorize", "--transaction-id", "chain-1"])
+            .args(["--category", "compras:presentes"]),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    envs(
+        cargo_bin()
+            .args(["tx", "set-anatomy", "--transaction-id", "chain-1"])
+            .args(["--description", "Bicicleta infantil 1/3"])
+            .args(["--merchant-name", "Loja Exemplo"])
+            .args(["--purpose", "Presente de aniversário"]),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    let second_fixture = temp.path().join("second.json");
+    write_file(
+        &second_fixture,
+        &fixture(vec![
+            installment("chain-1", first, "1/3"),
+            installment("chain-2", second, "2/3"),
+        ]),
+    );
+    sync(&second_fixture);
+
+    let conn = Connection::open(data_dir.join("phai.local.db")).expect("open db");
+    let row: (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT description, merchant_name, purpose, category_id, category_source
+             FROM transactions WHERE transaction_id = 'chain-2'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("second installment");
+    assert_eq!(
+        row,
+        (
+            "Bicicleta infantil 2/3".to_string(),
+            "Loja Exemplo".to_string(),
+            "Presente de aniversário".to_string(),
+            "compras:presentes".to_string(),
+            "manual".to_string(),
+        )
+    );
+
+    envs(
+        cargo_bin().args(["tx", "propagate-installments", "--dry-run"]),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "Parcelas preenchidas a partir da mesma compra: 0",
+    ));
+}

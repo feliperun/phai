@@ -18,7 +18,8 @@ pub mod storage;
 
 pub use config::{AppConfig, BackendKind, ConfigPaths};
 pub use installments::{
-    group_into_chains, parse_installment_description, InstallmentChain, InstallmentMarker,
+    group_into_chains, installment_anatomy_fills, parse_installment_description,
+    InstallmentAnatomyFill, InstallmentChain, InstallmentMarker,
 };
 pub use invite::{open as open_invite, seal as seal_invite, Invite};
 pub use models::{
