@@ -213,7 +213,7 @@ fn card_row(
     Some(SheetRow {
         section: Section::Cards,
         key: format!("{CARD_KEY_PREFIX}{}", card.account_id),
-        item: format!("Cartão {}", card.label),
+        item: card_item(&card.label),
         planned,
         actual,
         status: card_status(card, input).to_string(),
@@ -224,6 +224,16 @@ fn card_row(
         notes: (!notes.is_empty()).then(|| notes.join(" · ")),
         editable: true,
     })
+}
+
+/// `Cartão <label>`, unless the label already says it is a card.
+fn card_item(label: &str) -> String {
+    let lower = label.to_lowercase();
+    if lower.contains("cartão") || lower.contains("cartao") {
+        label.to_string()
+    } else {
+        format!("Cartão {label}")
+    }
 }
 
 fn card_status(card: &CreditCard, input: &MonthInputs<'_>) -> &'static str {
@@ -507,6 +517,12 @@ mod tests {
                 ("lazer".to_string(), Decimal::new(300, 0)),
             ]
         );
+    }
+
+    #[test]
+    fn card_item_does_not_repeat_cartao() {
+        assert_eq!(card_item("Cartão Roxo"), "Cartão Roxo");
+        assert_eq!(card_item("Nubank"), "Cartão Nubank");
     }
 
     #[test]

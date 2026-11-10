@@ -268,23 +268,15 @@ fn cell_values(cells: &[Vec<Cell>]) -> Vec<Vec<Value>> {
 fn cell_value(cell: &Cell) -> Value {
     match cell {
         Cell::Empty => Value::String(String::new()),
-        Cell::Text(text) if reads_as_input(text) => Value::String(format!("'{text}")),
-        Cell::Text(text) => Value::String(text.clone()),
+        // The leading apostrophe keeps text as typed: USER_ENTERED would
+        // otherwise read `NOVEMBRO 2026` as a date or `2/3` as a fraction.
+        // Sheets hides it and reads it back without it.
+        Cell::Text(text) => Value::String(format!("'{text}")),
         // The JSON number is only the wire format; the amount was rounded as
         // a Decimal and the sheet stores it as typed.
         Cell::Number(n) => serde_json::from_str(&n.to_string()).unwrap_or(Value::Null),
         Cell::Formula(formula) => Value::String(formula.clone()),
     }
-}
-
-/// Text that `USER_ENTERED` would turn into a formula, number or date.
-fn reads_as_input(text: &str) -> bool {
-    let starts_like_formula = text.starts_with(['=', '+', '-', '@']);
-    let numeric_like = text.chars().any(|c| c.is_ascii_digit())
-        && text
-            .chars()
-            .all(|c| c.is_ascii_digit() || " /.:,-".contains(c));
-    starts_like_formula || numeric_like
 }
 
 fn month_format(sheet_id: i64, bold_rows: &[usize]) -> Vec<Value> {
@@ -355,17 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn text_that_sheets_would_reinterpret_is_quoted() {
+    fn text_is_written_literally_so_sheets_never_reinterprets_it() {
+        assert_eq!(
+            cell_value(&Cell::Text("NOVEMBRO 2026".into())),
+            json!("'NOVEMBRO 2026")
+        );
         assert_eq!(cell_value(&Cell::Text("2/3".into())), json!("'2/3"));
         assert_eq!(cell_value(&Cell::Text("-ajuste".into())), json!("'-ajuste"));
-        assert_eq!(
-            cell_value(&Cell::Text("Puket (2/3)".into())),
-            json!("Puket (2/3)")
-        );
-        assert_eq!(
-            cell_value(&Cell::Text("moradia:aluguel".into())),
-            json!("moradia:aluguel")
-        );
     }
 
     #[test]
@@ -451,7 +439,7 @@ mod tests {
             .and(path(format!("{ID}/values:batchUpdate")))
             .and(body_partial_json(
                 json!({"valueInputOption": "USER_ENTERED",
-                "data": [{"range": "'MAIO 2030'!A1", "values": [["MAIO 2030", 10]]}]}),
+                "data": [{"range": "'MAIO 2030'!A1", "values": [["'MAIO 2030", 10]]}]}),
             ))
             .respond_with(ok())
             .expect(1)

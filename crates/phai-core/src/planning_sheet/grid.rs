@@ -24,6 +24,8 @@ pub const HEADERS: [&str; 10] = [
     "Obs.",
     "id",
 ];
+/// Start of the note phai writes in `C1` of every month tab it owns.
+pub const SIGNATURE: &str = "Atualizado pelo phai";
 const BALANCE_LABEL: &str = "SALDO DO MÊS";
 const ACTUALS_TITLE: &str = "REALIZADO POR CATEGORIA";
 /// Column index of the category actuals block (`L`).
@@ -162,6 +164,15 @@ fn place_actuals(cells: &mut Vec<Vec<Cell>>, actuals: &[(String, Decimal)]) {
         row.truncate(ACTUALS_COL);
         row.extend(pair);
     }
+}
+
+/// Whether a tab carries phai's note in `C1`, i.e. phai wrote it even if
+/// the manifest lost track of it.
+pub fn is_phai_tab(values: &[Vec<Value>]) -> bool {
+    values
+        .first()
+        .and_then(|row| text_at(row, 2))
+        .is_some_and(|note| note.starts_with(SIGNATURE))
 }
 
 /// A data line read back from a month tab.
@@ -530,6 +541,14 @@ mod tests {
         }];
         let values = as_values(&render_manifest(&entries));
         assert_eq!(parse_manifest(&values), entries);
+    }
+
+    #[test]
+    fn phai_tabs_are_recognised_by_the_note_in_c1() {
+        let ours = as_values(&render_tab(&tab(), &format!("{SIGNATURE} em 01/05/2030")).cells);
+        assert!(is_phai_tab(&ours));
+        assert!(!is_phai_tab(&[vec![json!("meu rascunho")]]));
+        assert!(!is_phai_tab(&[]));
     }
 
     #[test]

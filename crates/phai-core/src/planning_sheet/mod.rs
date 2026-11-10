@@ -17,8 +17,8 @@ pub use diff::{
     TAB_MARKER,
 };
 pub use grid::{
-    parse_manifest, parse_tab, render_lists, render_manifest, render_tab, Cell, ParsedRow,
-    ParsedTab, RenderedTab, HEADERS,
+    is_phai_tab, parse_manifest, parse_tab, render_lists, render_manifest, render_tab, Cell,
+    ParsedRow, ParsedTab, RenderedTab, HEADERS, SIGNATURE,
 };
 
 use chrono::{Datelike, NaiveDate};

@@ -14,15 +14,16 @@ use clap::{Args, Subcommand};
 use phai_core::google_sheets::{HttpSheets, SheetsApi, TabFormat, TabWrite};
 use phai_core::migrations::run_migrations;
 use phai_core::planning_sheet::{
-    build_month_tab, diff_tab, managed_tabs, manifest_entries, month_from_title, parse_manifest,
-    parse_tab, render_lists, render_manifest, render_tab, tab_title, CreditCard, ManifestEntry,
-    MonthInputs, MonthTab, ParsedTab, SheetEdit, LISTS_TAB, MANIFEST_TAB,
+    build_month_tab, diff_tab, is_phai_tab, managed_tabs, manifest_entries, month_from_title,
+    parse_manifest, parse_tab, render_lists, render_manifest, render_tab, tab_title, CreditCard,
+    ManifestEntry, MonthInputs, MonthTab, ParsedTab, SheetEdit, LISTS_TAB, MANIFEST_TAB, SIGNATURE,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::{AccountRecord, AppConfig, CardSummaryRow, MonthlySpendRow};
+use phai_core::{AccountRecord, AppConfig, CardSummaryRow, CategoryRecord, MonthlySpendRow};
 use rust_decimal::Decimal;
 use serde_json::Value;
 
+use crate::human_format::{capitalize_first, family_label};
 use crate::load_config;
 use crate::planning_sheet_apply::{flush, WorkingSet, WorkingSetInit};
 
@@ -195,10 +196,15 @@ pub(crate) async fn sync_planning_sheet(
     report.forecasts_written = flush(store, &set).await?;
 
     let rendered = render_months(store, &context, &set, &months, options.today).await?;
-    let foreign = foreign_tabs(&titles, &manifest, &months);
+    let (foreign, adopted) = unclaimed_tabs(api, &titles, &manifest, &months).await?;
     for title in &foreign {
         report.warnings.push(format!(
             "a aba \"{title}\" já existia e não foi criada pelo phai; renomeie-a para o phai assumir esse mês"
+        ));
+    }
+    for title in &adopted {
+        report.warnings.push(format!(
+            "a aba \"{title}\" é do phai mas não estava no registro _phai; foi reescrita sem importar edições"
         ));
     }
     let writes = tab_writes(&rendered, &foreign, &context, options.now);
@@ -254,18 +260,31 @@ async fn read_sheet(
     Ok((manifest, tabs))
 }
 
-/// Month tabs in the horizon that exist but were not written by phai.
-fn foreign_tabs(
+/// Month tabs in the horizon that exist but the manifest does not list:
+/// `(foreign, adopted)`. A tab carrying phai's note in `C1` was written by
+/// phai (the manifest lost it) and is rewritten without importing edits; any
+/// other tab belongs to the person and is left alone.
+async fn unclaimed_tabs(
+    api: &dyn SheetsApi,
     titles: &[String],
     manifest: &[ManifestEntry],
     months: &[NaiveDate],
-) -> BTreeSet<String> {
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     let managed = managed_tabs(manifest);
-    months
+    let unclaimed: Vec<String> = months
         .iter()
         .map(|m| tab_title(*m))
         .filter(|t| titles.contains(t) && !managed.contains(t))
-        .collect()
+        .collect();
+    let grids = api.read_tabs(&unclaimed).await?;
+    let (adopted, foreign): (Vec<_>, Vec<_>) = unclaimed
+        .into_iter()
+        .zip(grids)
+        .partition(|(_, grid)| is_phai_tab(grid));
+    Ok((
+        foreign.into_iter().map(|(t, _)| t).collect(),
+        adopted.into_iter().map(|(t, _)| t).collect(),
+    ))
 }
 
 /// What phai knows beyond forecasts: categories, accounts and cards.
@@ -280,19 +299,9 @@ struct SheetContext {
 impl SheetContext {
     async fn load(store: &dyn FinanceStore, config: &AppConfig) -> Result<Self> {
         let categories = store.get_categories().await.context("get_categories")?;
-        let names: HashMap<&str, &str> = categories
-            .iter()
-            .map(|c| (c.category_id.as_str(), c.name.as_str()))
-            .collect();
         let category_labels = categories
             .iter()
-            .map(|c| {
-                let label = match c.parent_category_id.as_deref().and_then(|p| names.get(p)) {
-                    Some(parent) => format!("{parent} › {}", c.name),
-                    None => c.name.clone(),
-                };
-                (c.category_id.clone(), label)
-            })
+            .map(|c| (c.category_id.clone(), category_label(c)))
             .collect();
         let accounts = store.get_accounts().await.context("get_accounts")?;
         Ok(Self {
@@ -312,6 +321,18 @@ impl SheetContext {
                 .await
                 .context("internal_categories")?,
         })
+    }
+}
+
+/// `Alimentação › Restaurantes` from the category's family and its name.
+fn category_label(category: &CategoryRecord) -> String {
+    match category.parent_category_id.as_deref() {
+        Some(parent) => format!(
+            "{} › {}",
+            family_label(parent),
+            capitalize_first(&category.name)
+        ),
+        None => family_label(&category.category_id),
     }
 }
 
@@ -403,7 +424,7 @@ fn tab_writes(
     now: DateTime<Utc>,
 ) -> Vec<TabWrite> {
     let label = format!(
-        "Atualizado pelo phai em {}. Edite Item, Previsto, Dia, Repete, Categoria, Conta e Obs.",
+        "{SIGNATURE} em {}. Edite Item, Previsto, Dia, Repete, Categoria, Conta e Obs.",
         now.with_timezone(&Local).format("%d/%m/%Y %H:%M")
     );
     let ours: Vec<&MonthTab> = tabs
@@ -474,7 +495,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use phai_core::planning_sheet::Cell;
-    use phai_core::{CategoryRecord, ForecastRecord};
+    use phai_core::ForecastRecord;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -639,7 +660,7 @@ mod tests {
         let rent = &may[row_index(&may, "Aluguel")];
         assert_eq!(rent[1], json!(5000));
         assert_eq!(rent[9], json!("aluguel-maio"));
-        let card = &may[row_index(&may, "Cartão Conta cartao_a")];
+        let card = &may[row_index(&may, "Conta cartao_a")];
         assert_eq!(card[4], json!(17), "card row carries its due day");
     }
 
@@ -663,7 +684,7 @@ mod tests {
                 json!(12),
                 json!("mensal"),
             ];
-            let card = row_index(grid, "Cartão Conta cartao_a");
+            let card = row_index(grid, "Conta cartao_a");
             grid[card][1] = json!(4000);
         });
 
@@ -710,6 +731,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_phai_tab_missing_from_the_manifest_is_rewritten_without_importing_edits() {
+        let (_dir, config, store) = seeded_store().await;
+        let sheet = FakeSheet::default();
+        sync_planning_sheet(store.as_ref(), &sheet, &config, &options())
+            .await
+            .unwrap();
+        sheet.edit(MANIFEST_TAB, |grid| grid.truncate(1));
+        sheet.edit("MAIO 2030", |grid| {
+            let rent = row_index(grid, "Aluguel");
+            grid[rent][1] = json!(1);
+        });
+        let report = sync_planning_sheet(store.as_ref(), &sheet, &config, &options())
+            .await
+            .unwrap();
+        assert!(report.edits.is_empty());
+        assert_eq!(report.tabs_written, 3);
+        assert!(report.warnings.iter().any(|w| w.contains("registro _phai")));
+        let may = sheet.grid("MAIO 2030");
+        assert_eq!(may[row_index(&may, "Aluguel")][1], json!(5000));
+        let rent = store.get_forecast("aluguel-maio").await.unwrap().unwrap();
+        assert_eq!(rent.amount, Decimal::new(-5000, 0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn dry_run_reports_edits_without_writing() {
         let (_dir, config, store) = seeded_store().await;
         let sheet = FakeSheet::default();
@@ -732,6 +777,27 @@ mod tests {
         assert_eq!(sheet.grid("MAIO 2030"), before);
         let rent = store.get_forecast("aluguel-maio").await.unwrap().unwrap();
         assert_eq!(rent.amount, Decimal::new(-5000, 0));
+    }
+
+    #[test]
+    fn category_label_reads_family_then_name() {
+        let category = |id: &str, name: &str, parent: Option<&str>| CategoryRecord {
+            category_id: id.to_string(),
+            name: name.to_string(),
+            parent_category_id: parent.map(str::to_string),
+            metadata_json: json!({}),
+            actor_id: "t".to_string(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(
+            category_label(&category(
+                "alimentacao:restaurantes",
+                "restaurantes",
+                Some("alimentacao")
+            )),
+            "Alimentação › Restaurantes"
+        );
+        assert_eq!(category_label(&category("saude", "saude", None)), "Saúde");
     }
 
     #[test]
