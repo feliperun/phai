@@ -48,6 +48,15 @@ pub struct AppConfig {
     /// accounts). Surfaced by `/api/accounts`.
     #[serde(default)]
     pub account_labels: std::collections::HashMap<String, String>,
+    /// Google Sheets spreadsheet id of the household planning sheet
+    /// (ADR-0041). Shared with the service account as an editor; `phai sheets
+    /// sync` and every Pluggy sync keep its month tabs in step with phai.
+    #[serde(default)]
+    pub planning_sheet_id: Option<String>,
+    /// How many month tabs the planning sheet carries from the current month
+    /// on (the previous month is always kept too). Defaults to 12.
+    #[serde(default)]
+    pub planning_sheet_months: Option<u32>,
     /// LLM provider for enrichment (Phase 2+): "anthropic", "openai",
     /// "deepseek", "ollama". Defaults read at runtime — no logic in
     /// Phase 1.
@@ -74,6 +83,8 @@ impl Default for AppConfig {
             pluggy_accounts_csv_path: None,
             locked_categories: Vec::new(),
             account_labels: std::collections::HashMap::new(),
+            planning_sheet_id: None,
+            planning_sheet_months: None,
             llm_provider: None,
             llm_model: None,
         }

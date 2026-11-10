@@ -12,7 +12,10 @@ mod diff;
 mod grid;
 
 pub use build::{build_month_tab, CreditCard, MonthInputs};
-pub use diff::{diff_tab, manifest_entries, ManifestEntry, RowSnapshot, SheetEdit, TabDiff};
+pub use diff::{
+    diff_tab, managed_tabs, manifest_entries, ManifestEntry, RowSnapshot, SheetEdit, TabDiff,
+    TAB_MARKER,
+};
 pub use grid::{
     parse_manifest, parse_tab, render_lists, render_manifest, render_tab, Cell, ParsedRow,
     ParsedTab, RenderedTab, HEADERS,
