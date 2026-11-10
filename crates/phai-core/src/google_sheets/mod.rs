@@ -14,22 +14,29 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 
-use crate::planning_sheet::{Cell, LISTS_TAB};
+use crate::planning_sheet::{Cell, Range, Style, Validation};
+
+mod format;
 
 const SHEETS_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets";
 const SHEETS_API: &str = "https://sheets.googleapis.com/v4/spreadsheets";
-/// Columns a month tab spans (`A:M`).
-const MONTH_COLUMNS: usize = 13;
-const ID_COLUMN: usize = 9;
 
 /// How a tab is formatted after its values are written.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TabFormat {
-    /// A month tab: bold rows, currency columns, frozen header, hidden id
-    /// column and dropdowns fed by the lists tab.
-    Month { bold_rows: Vec<usize> },
+    /// A month tab: colours, number formats, merges, dropdowns, column
+    /// widths, frozen header and hidden id column.
+    Month(MonthFormat),
     /// Values only (hidden bookkeeping tabs).
     Plain,
+}
+
+/// The presentation half of a rendered month tab.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MonthFormat {
+    pub styles: Vec<(Style, Range)>,
+    pub merges: Vec<Range>,
+    pub validations: Vec<(Validation, Range)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,7 +177,7 @@ async fn read_json(response: reqwest::Response) -> Result<Value> {
 }
 
 /// `'Tab name'` as A1 notation for the whole tab.
-fn quoted(title: &str) -> String {
+pub(crate) fn quoted(title: &str) -> String {
     format!("'{}'", title.replace('\'', "''"))
 }
 
@@ -233,7 +240,7 @@ impl SheetsApi for HttpSheets {
             .filter_map(|t| {
                 let id = ids.iter().find(|(title, _)| *title == t.title)?.1;
                 match &t.format {
-                    TabFormat::Month { bold_rows } => Some(month_format(id, bold_rows)),
+                    TabFormat::Month(month) => Some(format::month_requests(id, month)),
                     TabFormat::Plain => None,
                 }
             })
@@ -277,62 +284,6 @@ fn cell_value(cell: &Cell) -> Value {
         Cell::Number(n) => serde_json::from_str(&n.to_string()).unwrap_or(Value::Null),
         Cell::Formula(formula) => Value::String(formula.clone()),
     }
-}
-
-fn month_format(sheet_id: i64, bold_rows: &[usize]) -> Vec<Value> {
-    let range = |r0: usize, r1: usize, c0: usize, c1: usize| {
-        json!({"sheetId": sheet_id, "startRowIndex": r0, "endRowIndex": r1,
-               "startColumnIndex": c0, "endColumnIndex": c1})
-    };
-    let format = |range: Value, format: Value, fields: &str| json!({"repeatCell": {"range": range, "cell": {"userEnteredFormat": format}, "fields": fields}});
-    let currency = json!({"numberFormat": {"type": "CURRENCY", "pattern": "\"R$\" #,##0.00"}});
-    let grey = json!({"backgroundColor": {"red": 0.95, "green": 0.95, "blue": 0.95}});
-    let lists = |col: &str| json!({"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": format!("={}!{col}2:{col}", quoted(LISTS_TAB))}]});
-    let validation = |col: usize, condition: Value| {
-        json!({"setDataValidation": {"range": range(2, 1000, col, col + 1),
-               "rule": {"condition": condition, "strict": false, "showCustomUi": true}}})
-    };
-    let mut requests = vec![
-        json!({"repeatCell": {"range": {"sheetId": sheet_id}, "cell": {"userEnteredFormat": {}}, "fields": "userEnteredFormat"}}),
-        format(
-            range(2, 1000, 1, 3),
-            currency.clone(),
-            "userEnteredFormat.numberFormat",
-        ),
-        format(
-            range(2, 1000, 12, 13),
-            currency,
-            "userEnteredFormat.numberFormat",
-        ),
-        format(
-            range(2, 1000, 2, 4),
-            grey,
-            "userEnteredFormat.backgroundColor",
-        ),
-        json!({"updateSheetProperties": {"properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 2}},
-               "fields": "gridProperties.frozenRowCount"}}),
-        json!({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-               "startIndex": ID_COLUMN, "endIndex": ID_COLUMN + 1},
-               "properties": {"hiddenByUser": true}, "fields": "hiddenByUser"}}),
-        validation(
-            5,
-            json!({"type": "ONE_OF_LIST", "values": [{"userEnteredValue": "mensal"}]}),
-        ),
-        validation(6, lists("A")),
-        validation(7, lists("B")),
-    ];
-    requests.extend(bold_rows.iter().map(|&r| {
-        format(
-            range(r, r + 1, 0, MONTH_COLUMNS),
-            json!({"textFormat": {"bold": true}}),
-            "userEnteredFormat.textFormat.bold",
-        )
-    }));
-    requests.push(
-        json!({"autoResizeDimensions": {"dimensions": {"sheetId": sheet_id,
-        "dimension": "COLUMNS", "startIndex": 0, "endIndex": MONTH_COLUMNS}}}),
-    );
-    requests
 }
 
 #[cfg(test)]
@@ -448,7 +399,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(batch.as_str()))
             .and(body_partial_json(
-                json!({"requests": [{"repeatCell": {"range": {"sheetId": 11}}}]}),
+                json!({"requests": [{"unmergeCells": {"range": {"sheetId": 11}}}]}),
             ))
             .respond_with(ok())
             .expect(1)
@@ -462,7 +413,7 @@ mod tests {
                     Cell::Number(Decimal::new(10, 0)),
                 ]],
                 hidden: false,
-                format: TabFormat::Month { bold_rows: vec![0] },
+                format: TabFormat::Month(MonthFormat::default()),
             }])
             .await
             .unwrap();

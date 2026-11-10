@@ -1,13 +1,22 @@
-//! Turn a month's forecasts and actuals into the rows of its tab.
+//! Turn a month's forecasts and actuals into what its tab shows.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde_json::Value;
 
-use super::{MonthTab, Section, SheetRow, CARD_BUDGET_KIND, CARD_KEY_PREFIX, SHEET_ORIGIN};
-use crate::models::{CardSummaryRow, ForecastRecord};
+use super::{
+    EnvelopeBlock, InstallmentLine, MonthTab, Section, SheetRow, CARD_BUDGET_KIND, CARD_KEY_PREFIX,
+    SHEET_ORIGIN,
+};
+use crate::installments::{parse_installment_description, InstallmentMarker};
+use crate::models::{CardSummaryRow, ForecastRecord, TransactionRecord};
+
+/// Purchases listed under a category budget; the rest are summed in one line.
+const ENVELOPE_LINES: usize = 10;
+/// Width of a purchase's description inside a category block.
+const LINE_WIDTH: usize = 22;
 
 /// A credit card account and its billing days (from `accounts.metadata_json`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,9 +37,9 @@ pub struct MonthInputs<'a> {
     pub cards: &'a [CreditCard],
     /// `card_summary` rows of the billing cycle that closes in the month.
     pub card_totals: &'a [CardSummaryRow],
-    /// Actual spend per category id in the month, as positive magnitudes.
-    pub category_spend: &'a [(String, Decimal)],
-    pub category_labels: &'a HashMap<String, String>,
+    /// The month's transactions by purchase date: each category budget lists
+    /// and sums its purchases.
+    pub transactions: &'a [TransactionRecord],
     /// Series a person ended from the sheet (`Repete` cleared).
     pub closed_series: &'a BTreeSet<String>,
 }
@@ -42,34 +51,44 @@ pub fn build_month_tab(input: &MonthInputs<'_>) -> MonthTab {
         .iter()
         .filter(|f| is_live(&f.status))
         .collect();
-    let (on_card, own): (Vec<&ForecastRecord>, Vec<&ForecastRecord>) =
-        live.into_iter().partition(|f| {
-            !is_sheet_row(f)
+    let on_card = |f: &&ForecastRecord| {
+        is_card_budget(f)
+            || !is_sheet_row(f)
                 && f.account_id
                     .as_deref()
                     .is_some_and(|account| card_ids.contains(account))
-                || is_card_budget(f)
-        });
-
-    let mut rows: Vec<SheetRow> = own.iter().map(|f| forecast_row(f, input)).collect();
-    rows.sort_by(|a, b| (a.section as u8, a.day, &a.item).cmp(&(b.section as u8, b.day, &b.item)));
-    let mut cards: Vec<SheetRow> = input
-        .cards
+    };
+    let card_forecasts: Vec<&ForecastRecord> = live.iter().copied().filter(on_card).collect();
+    let (envelopes, own): (Vec<&ForecastRecord>, Vec<&ForecastRecord>) = live
         .iter()
-        .filter_map(|card| card_row(card, &on_card, input))
+        .copied()
+        .filter(|f| !on_card(f))
+        .partition(|f| is_envelope(f) && !is_realized(f));
+
+    let mut rows: Vec<SheetRow> = own
+        .iter()
+        .map(|f| forecast_row(f, input.today, input.closed_series))
         .collect();
+    rows.sort_by(|a, b| (a.section as u8, a.day, &a.item).cmp(&(b.section as u8, b.day, &b.item)));
     let split = rows
         .iter()
         .position(|r| r.section == Section::Income)
         .unwrap_or(rows.len());
     let income = rows.split_off(split);
-    rows.append(&mut cards);
+    rows.extend(
+        input
+            .cards
+            .iter()
+            .filter_map(|card| card_row(card, &card_forecasts, input)),
+    );
     rows.extend(income);
 
     MonthTab {
         month: input.month,
         rows,
-        category_actuals: category_actuals(input),
+        installments: installment_lines(&card_forecasts, input.cards),
+        debit: debit_block(&live, input, &card_ids),
+        envelopes: envelopes.iter().map(|f| envelope(f, input)).collect(),
     }
 }
 
@@ -99,6 +118,12 @@ fn is_open_bill(f: &ForecastRecord) -> bool {
     f.forecast_id.starts_with("cob-")
 }
 
+/// A category-wide budget: no account to reconcile against, so its actual
+/// is the month's spend in the category.
+fn is_envelope(f: &ForecastRecord) -> bool {
+    f.account_id.is_none() && f.category_id.is_some()
+}
+
 /// The amount a forecast planned before reconciliation overwrote it with
 /// the matching transaction's amount.
 fn predicted_amount(f: &ForecastRecord) -> Decimal {
@@ -107,7 +132,11 @@ fn predicted_amount(f: &ForecastRecord) -> Decimal {
         .unwrap_or(f.amount)
 }
 
-fn forecast_row(f: &ForecastRecord, input: &MonthInputs<'_>) -> SheetRow {
+fn forecast_row(
+    f: &ForecastRecord,
+    today: NaiveDate,
+    closed_series: &BTreeSet<String>,
+) -> SheetRow {
     let section = if f.amount > Decimal::ZERO {
         Section::Income
     } else {
@@ -119,10 +148,10 @@ fn forecast_row(f: &ForecastRecord, input: &MonthInputs<'_>) -> SheetRow {
         key: f.forecast_id.clone(),
         item: f.description.clone(),
         planned: Some(predicted_amount(f).abs()),
-        actual: row_actual(f, input),
-        status: row_status(f, section, input.today).to_string(),
+        actual: realized.then(|| f.amount.abs()),
+        status: row_status(f, today).to_string(),
         day: f.due_date.map(|d| d.day()),
-        repeats: row_repeats(f, input.closed_series),
+        repeats: row_repeats(f, closed_series),
         category_id: f.category_id.clone(),
         account_id: f.account_id.clone(),
         notes: meta_str(f, "notes").map(str::to_string),
@@ -130,31 +159,14 @@ fn forecast_row(f: &ForecastRecord, input: &MonthInputs<'_>) -> SheetRow {
     }
 }
 
-/// A category-wide budget: no account to reconcile against, so its actual
-/// is the month's spend in the category.
-fn is_envelope(f: &ForecastRecord) -> bool {
-    f.account_id.is_none() && f.category_id.is_some()
-}
-
-fn row_actual(f: &ForecastRecord, input: &MonthInputs<'_>) -> Option<Decimal> {
+/// The household's own vocabulary: `Pago`, `Atrasado`, `Previsto`.
+fn row_status(f: &ForecastRecord, today: NaiveDate) -> &'static str {
     if is_realized(f) {
-        return Some(f.amount.abs());
-    }
-    if !is_envelope(f) {
-        return None;
-    }
-    f.category_id
-        .as_deref()
-        .map(|c| category_total(input.category_spend, c))
-}
-
-fn row_status(f: &ForecastRecord, section: Section, today: NaiveDate) -> &'static str {
-    match (is_realized(f), section) {
-        (true, Section::Income) => "Recebido",
-        (true, _) => "Pago",
-        _ if is_envelope(f) => "Orçamento",
-        _ if f.due_date.is_some_and(|d| d < today) => "Pendente",
-        _ => "Previsto",
+        "Pago"
+    } else if f.due_date.is_some_and(|d| d < today) {
+        "Atrasado"
+    } else {
+        "Previsto"
     }
 }
 
@@ -164,21 +176,151 @@ fn row_repeats(f: &ForecastRecord, closed_series: &BTreeSet<String>) -> bool {
 }
 
 /// Spend in `category_id` and its subcategories (`moradia` covers `moradia:*`).
-fn category_total(spend: &[(String, Decimal)], category_id: &str) -> Decimal {
-    let prefix = format!("{category_id}:");
-    spend
+fn in_category(candidate: Option<&str>, category_id: &str) -> bool {
+    candidate.is_some_and(|c| {
+        c == category_id
+            || c.strip_prefix(category_id)
+                .is_some_and(|rest| rest.starts_with(':'))
+    })
+}
+
+fn envelope(f: &ForecastRecord, input: &MonthInputs<'_>) -> EnvelopeBlock {
+    let category = f.category_id.as_deref().unwrap_or_default();
+    let purchases = purchases(input.transactions, |t| {
+        in_category(t.category_id.as_deref(), category)
+    });
+    summarize(f.description.clone(), predicted_amount(f).abs(), &purchases)
+}
+
+/// Spending from non-card accounts (debit, Pix, cash) not already shown as
+/// a paid row of the table.
+fn debit_block(
+    live: &[&ForecastRecord],
+    input: &MonthInputs<'_>,
+    card_ids: &BTreeSet<&str>,
+) -> EnvelopeBlock {
+    let covered: BTreeSet<&str> = live
         .iter()
-        .filter(|(c, _)| c == category_id || c.starts_with(&prefix))
-        .map(|(_, v)| *v)
-        .sum()
+        .filter_map(|f| f.realized_transaction_id.as_deref())
+        .collect();
+    let spent = purchases(input.transactions, |t| {
+        !t.account_id
+            .as_deref()
+            .is_some_and(|account| card_ids.contains(account))
+            && !covered.contains(t.transaction_id.as_str())
+    });
+    summarize("Débito / Dinheiro".to_string(), Decimal::ZERO, &spent)
+}
+
+/// Outgoing transactions matching `keep`, largest first, each purchase once
+/// even when it was imported twice (statement and aggregator).
+fn purchases(
+    transactions: &[TransactionRecord],
+    keep: impl Fn(&TransactionRecord) -> bool,
+) -> Vec<&TransactionRecord> {
+    let mut seen = BTreeSet::new();
+    let mut out: Vec<&TransactionRecord> = transactions
+        .iter()
+        .filter(|t| t.amount < Decimal::ZERO && t.payment_status != "installment")
+        .filter(|t| keep(t))
+        .filter(|t| {
+            seen.insert((
+                t.account_id.clone(),
+                t.transaction_date,
+                t.amount,
+                t.raw_description.trim().to_lowercase(),
+            ))
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.amount
+            .cmp(&b.amount)
+            .then(a.transaction_date.cmp(&b.transaction_date))
+    });
+    out
+}
+
+/// The largest purchases one per line, the rest in `outras (n)`.
+fn summarize(title: String, planned: Decimal, purchases: &[&TransactionRecord]) -> EnvelopeBlock {
+    let actual: Decimal = purchases.iter().map(|t| t.amount.abs()).sum();
+    let mut lines: Vec<(String, Decimal)> = purchases
+        .iter()
+        .take(ENVELOPE_LINES)
+        .map(|t| (short(t.display_description()), t.amount.abs()))
+        .collect();
+    if let Some(rest) = purchases.get(ENVELOPE_LINES..).filter(|r| !r.is_empty()) {
+        let total = rest.iter().map(|t| t.amount.abs()).sum();
+        lines.push((format!("outras ({})", rest.len()), total));
+    }
+    EnvelopeBlock {
+        title,
+        planned,
+        actual,
+        lines,
+    }
+}
+
+fn short(text: &str) -> String {
+    let main = text.split('|').next().unwrap_or(text).trim();
+    if main.chars().count() <= LINE_WIDTH {
+        main.to_string()
+    } else {
+        let cut: String = main.chars().take(LINE_WIDTH - 1).collect();
+        format!("{}…", cut.trim_end())
+    }
+}
+
+fn installment_lines(
+    card_forecasts: &[&ForecastRecord],
+    cards: &[CreditCard],
+) -> Vec<InstallmentLine> {
+    let mut lines: Vec<InstallmentLine> = card_forecasts
+        .iter()
+        .filter(|f| !is_card_budget(f) && !is_open_bill(f))
+        .filter_map(|f| {
+            let marker = installment_marker(&f.description)?;
+            let card = cards
+                .iter()
+                .find(|c| Some(c.account_id.as_str()) == f.account_id.as_deref())
+                .map_or_else(String::new, |c| card_short(&c.label));
+            Some(InstallmentLine {
+                item: marker.base_description,
+                card,
+                number: marker.current,
+                total: marker.total,
+                amount: f.amount.abs(),
+            })
+        })
+        .collect();
+    lines.sort_by(|a, b| (&a.card, &a.item).cmp(&(&b.card, &b.item)));
+    lines
+}
+
+/// The `k/n` of an installment forecast, written `Loja (2/5)` or `Loja 2/5`.
+fn installment_marker(description: &str) -> Option<InstallmentMarker> {
+    let trimmed = description.trim();
+    let unwrapped = trimmed
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once('('))
+        .map(|(base, marker)| format!("{} {marker}", base.trim_end()));
+    parse_installment_description(unwrapped.as_deref().unwrap_or(trimmed))
+}
+
+/// `Roxo` for `Cartão Roxo`: the column is narrow.
+fn card_short(label: &str) -> String {
+    label
+        .split_whitespace()
+        .filter(|w| !w.eq_ignore_ascii_case("cartão") && !w.eq_ignore_ascii_case("cartao"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn card_row(
     card: &CreditCard,
-    on_card: &[&ForecastRecord],
+    card_forecasts: &[&ForecastRecord],
     input: &MonthInputs<'_>,
 ) -> Option<SheetRow> {
-    let mine: Vec<&ForecastRecord> = on_card
+    let mine: Vec<&ForecastRecord> = card_forecasts
         .iter()
         .copied()
         .filter(|f| f.account_id.as_deref() == Some(card.account_id.as_str()))
@@ -253,28 +395,9 @@ fn card_status(card: &CreditCard, input: &MonthInputs<'_>) -> &'static str {
 }
 
 fn last_day(month: NaiveDate) -> Option<NaiveDate> {
-    let next = if month.month() == 12 {
-        NaiveDate::from_ymd_opt(month.year() + 1, 1, 1)
-    } else {
-        NaiveDate::from_ymd_opt(month.year(), month.month() + 1, 1)
-    };
-    next.and_then(|d| d.pred_opt())
-}
-
-fn category_actuals(input: &MonthInputs<'_>) -> Vec<(String, Decimal)> {
-    let mut totals: HashMap<String, Decimal> = HashMap::new();
-    for (category_id, value) in input.category_spend {
-        let label = input
-            .category_labels
-            .get(category_id)
-            .cloned()
-            .unwrap_or_else(|| category_id.clone());
-        *totals.entry(label).or_default() += *value;
-    }
-    let mut out: Vec<(String, Decimal)> =
-        totals.into_iter().filter(|(_, v)| !v.is_zero()).collect();
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    out
+    month
+        .checked_add_months(chrono::Months::new(1))
+        .and_then(|d| d.pred_opt())
 }
 
 /// `R$ 1.234,56` — for notes only; money cells are written as numbers.
@@ -327,6 +450,33 @@ mod tests {
         }
     }
 
+    fn purchase(id: &str, category: &str, cents: i64) -> TransactionRecord {
+        TransactionRecord {
+            transaction_id: id.to_string(),
+            account_id: Some("cartao_a".to_string()),
+            transaction_date: d(2030, 5, 3),
+            raw_description: format!("compra {id}"),
+            description: None,
+            merchant_name: None,
+            purpose: None,
+            amount: Decimal::new(-cents, 2),
+            amount_cents: Some(-cents),
+            tx_type: "debit".to_string(),
+            category_id: Some(category.to_string()),
+            category_source: "rule".to_string(),
+            context: None,
+            classifier_trace: None,
+            payment_status: "posted".to_string(),
+            source: "pluggy".to_string(),
+            actor_id: "tester".to_string(),
+            idempotency_key: format!("tx-{id}"),
+            metadata_json: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            enrichment_attempted_at: None,
+        }
+    }
+
     fn card() -> CreditCard {
         CreditCard {
             account_id: "cartao_a".to_string(),
@@ -340,8 +490,7 @@ mod tests {
         forecasts: Vec<ForecastRecord>,
         cards: Vec<CreditCard>,
         totals: Vec<CardSummaryRow>,
-        spend: Vec<(String, Decimal)>,
-        labels: HashMap<String, String>,
+        transactions: Vec<TransactionRecord>,
         closed: BTreeSet<String>,
     }
 
@@ -351,8 +500,7 @@ mod tests {
                 forecasts,
                 cards: vec![card()],
                 totals: Vec::new(),
-                spend: Vec::new(),
-                labels: HashMap::new(),
+                transactions: Vec::new(),
                 closed: BTreeSet::new(),
             }
         }
@@ -364,8 +512,7 @@ mod tests {
                 forecasts: &self.forecasts,
                 cards: &self.cards,
                 card_totals: &self.totals,
-                category_spend: &self.spend,
-                category_labels: &self.labels,
+                transactions: &self.transactions,
                 closed_series: &self.closed,
             })
         }
@@ -378,8 +525,16 @@ mod tests {
             .collect()
     }
 
+    fn envelope_forecast(category: &str, amount: i64) -> ForecastRecord {
+        let mut f = forecast("mercado", d(2030, 5, 15), amount, "ativo");
+        f.account_id = None;
+        f.category_id = Some(category.to_string());
+        f.description = "Mercado".to_string();
+        f
+    }
+
     #[test]
-    fn rows_are_grouped_expenses_cards_income_and_skip_discarded() {
+    fn rows_are_fixed_bills_then_cards_then_income_and_skip_discarded() {
         let fx = Fixture::new(vec![
             forecast("salario", d(2030, 5, 5), 9000, "ativo"),
             forecast("aluguel", d(2030, 5, 3), -5000, "ativo"),
@@ -399,39 +554,116 @@ mod tests {
     }
 
     #[test]
-    fn realized_forecast_shows_predicted_and_actual_and_is_read_only() {
+    fn realized_forecast_is_pago_with_predicted_and_actual_and_read_only() {
         let mut paid = forecast("luz", d(2030, 5, 4), -431, "realizado");
         paid.metadata_json = json!({"predicted_amount": "-400"});
-        let tab = Fixture::new(vec![paid]).build(d(2030, 5, 20));
+        let mut salary = forecast("salario", d(2030, 5, 5), 9000, "realizado");
+        salary.realized_transaction_id = Some("tx".to_string());
+        let tab = Fixture::new(vec![paid, salary]).build(d(2030, 5, 20));
         let row = &tab.rows[0];
         assert_eq!(row.planned, Some(Decimal::new(400, 0)));
         assert_eq!(row.actual, Some(Decimal::new(431, 0)));
         assert_eq!(row.status, "Pago");
         assert!(!row.editable);
+        assert_eq!(tab.rows[2].status, "Pago", "income received is Pago too");
     }
 
     #[test]
-    fn unpaid_past_due_is_pending() {
+    fn unpaid_past_due_is_atrasado() {
         let tab = Fixture::new(vec![forecast("escola", d(2030, 5, 4), -2000, "ativo")])
             .build(d(2030, 5, 20));
-        assert_eq!(tab.rows[0].status, "Pendente");
+        assert_eq!(tab.rows[0].status, "Atrasado");
         assert_eq!(tab.rows[0].actual, None);
     }
 
     #[test]
-    fn category_envelope_actual_sums_subcategories() {
-        let mut envelope = forecast("mercado", d(2030, 5, 15), -3000, "ativo");
-        envelope.account_id = None;
-        envelope.category_id = Some("alimentacao".to_string());
-        let mut fx = Fixture::new(vec![envelope]);
-        fx.spend = vec![
-            ("alimentacao:mercado".to_string(), Decimal::new(1200, 0)),
-            ("alimentacao:padaria".to_string(), Decimal::new(300, 0)),
-            ("alimentacaox".to_string(), Decimal::new(999, 0)),
-        ];
+    fn category_budget_becomes_a_block_with_its_largest_purchases() {
+        let mut fx = Fixture::new(vec![envelope_forecast("alimentacao", -3000)]);
+        fx.transactions = (1..=12)
+            .map(|i| purchase(&format!("p{i:02}"), "alimentacao:mercado", i * 1000))
+            .chain([
+                purchase("fora", "lazer", 99_999),
+                purchase("prefixo", "alimentacaox", 99_999),
+                purchase("p12", "alimentacao:mercado", 12_000),
+            ])
+            .collect();
         let tab = fx.build(d(2030, 5, 20));
-        assert_eq!(tab.rows[0].actual, Some(Decimal::new(1500, 0)));
-        assert_eq!(tab.rows[0].status, "Orçamento");
+        assert!(
+            tab.rows.iter().all(|r| r.key != "mercado"),
+            "not a table row"
+        );
+        let block = &tab.envelopes[0];
+        assert_eq!(block.title, "Mercado");
+        assert_eq!(block.planned, Decimal::new(3000, 0));
+        assert_eq!(
+            block.actual,
+            Decimal::new(780, 0),
+            "1+2+…+12 tens, twin counted once"
+        );
+        assert_eq!(block.lines.len(), 11, "ten purchases and the rest");
+        assert_eq!(
+            block.lines[0],
+            ("compra p12".to_string(), Decimal::new(120, 0))
+        );
+        assert_eq!(
+            block.lines[10],
+            ("outras (2)".to_string(), Decimal::new(30, 0))
+        );
+    }
+
+    #[test]
+    fn debit_block_lists_account_spending_not_shown_as_a_paid_row() {
+        let mut rent = forecast("aluguel", d(2030, 5, 3), -5000, "realizado");
+        rent.realized_transaction_id = Some("t-aluguel".to_string());
+        let mut fx = Fixture::new(vec![rent]);
+        let on_account = |id: &str, cents| {
+            let mut t = purchase(id, "casa", cents);
+            t.account_id = Some("conta_corrente".to_string());
+            t
+        };
+        fx.transactions = vec![
+            on_account("t-aluguel", 500_000),
+            on_account("t-diarista", 35_000),
+            purchase("t-cartao", "casa", 9_000),
+        ];
+        let debit = fx.build(d(2030, 5, 20)).debit;
+        assert_eq!(debit.title, "Débito / Dinheiro");
+        assert_eq!(
+            debit.lines,
+            vec![("compra t-diarista".to_string(), Decimal::new(350, 0))]
+        );
+        assert_eq!(debit.actual, Decimal::new(350, 0));
+    }
+
+    #[test]
+    fn card_installments_are_listed_with_card_number_and_total() {
+        let mut parcela = forecast("installment-x", d(2030, 5, 2), -110, "ativo");
+        parcela.account_id = Some("cartao_a".to_string());
+        parcela.description = "Loja Tal (2/3)".to_string();
+        let mut subscription = forecast("sub", d(2030, 5, 2), -40, "ativo");
+        subscription.account_id = Some("cartao_a".to_string());
+        let tab = Fixture::new(vec![parcela, subscription]).build(d(2030, 5, 1));
+        assert_eq!(
+            tab.installments,
+            vec![InstallmentLine {
+                item: "Loja Tal".to_string(),
+                card: "A".to_string(),
+                number: 2,
+                total: 3,
+                amount: Decimal::new(110, 0),
+            }]
+        );
+    }
+
+    #[test]
+    fn installment_marker_reads_both_spellings() {
+        let paren = installment_marker("Loja Tal (2/3)").unwrap();
+        assert_eq!(
+            (paren.base_description.as_str(), paren.current, paren.total),
+            ("Loja Tal", 2, 3)
+        );
+        assert_eq!(installment_marker("Loja 4/10").map(|m| m.current), Some(4));
+        assert!(installment_marker("Assinatura (mensal)").is_none());
     }
 
     #[test]
@@ -499,30 +731,19 @@ mod tests {
     }
 
     #[test]
-    fn category_actuals_use_labels_and_sort_by_value() {
-        let mut fx = Fixture::new(Vec::new());
-        fx.spend = vec![
-            ("moradia:aluguel".to_string(), Decimal::new(5000, 0)),
-            ("lazer".to_string(), Decimal::new(300, 0)),
-        ];
-        fx.labels.insert(
-            "moradia:aluguel".to_string(),
-            "Moradia › Aluguel".to_string(),
-        );
-        let tab = fx.build(d(2030, 5, 20));
-        assert_eq!(
-            tab.category_actuals,
-            vec![
-                ("Moradia › Aluguel".to_string(), Decimal::new(5000, 0)),
-                ("lazer".to_string(), Decimal::new(300, 0)),
-            ]
-        );
+    fn card_names_are_short_and_never_repeat_cartao() {
+        assert_eq!(card_item("Cartão Roxo"), "Cartão Roxo");
+        assert_eq!(card_item("Nubank"), "Cartão Nubank");
+        assert_eq!(card_short("Cartão Roxo"), "Roxo");
     }
 
     #[test]
-    fn card_item_does_not_repeat_cartao() {
-        assert_eq!(card_item("Cartão Roxo"), "Cartão Roxo");
-        assert_eq!(card_item("Nubank"), "Cartão Nubank");
+    fn long_descriptions_are_cut_to_fit_the_block() {
+        assert_eq!(short("Padaria|extra"), "Padaria");
+        assert_eq!(
+            short("Supermercado Muito Grande Ltda"),
+            "Supermercado Muito Gr…"
+        );
     }
 
     #[test]

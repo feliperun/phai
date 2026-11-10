@@ -1,15 +1,18 @@
 //! Monthly planning tabs in a user-owned Google Sheet (ADR-0041).
 //!
-//! One tab per month mirrors the household's paper-style budget: planned
-//! expenses, card bills and income, each with `Previsto` (planned, editable)
-//! next to `Realizado` (actual, owned by phai). Edits typed into the sheet
-//! come back as forecast changes; everything else is re-rendered on every
-//! sync. This module is pure: it builds, renders, parses and diffs grids.
-//! The network client lives in [`crate::google_sheets`].
+//! One tab per month mirrors the household's paper-style budget: fixed
+//! bills, one line per card and income, each with `Previsto` (planned,
+//! editable) next to `Realizado` (actual, owned by phai), the month balance
+//! and the cash gap before the 15th; beside it, the month's card
+//! installments and one block per category budget. Edits typed into the
+//! sheet come back as forecast changes; everything else is re-rendered on
+//! every sync. This module is pure: it builds, renders, parses and diffs
+//! grids. The network client lives in [`crate::google_sheets`].
 
 mod build;
 mod diff;
 mod grid;
+mod layout;
 
 pub use build::{build_month_tab, CreditCard, MonthInputs};
 pub use diff::{
@@ -17,8 +20,12 @@ pub use diff::{
     TAB_MARKER,
 };
 pub use grid::{
-    is_phai_tab, parse_manifest, parse_tab, render_lists, render_manifest, render_tab, Cell,
-    ParsedRow, ParsedTab, RenderedTab, HEADERS, SIGNATURE,
+    is_phai_tab, parse_manifest, parse_tab, render_lists, render_manifest, Cell, ParsedRow,
+    ParsedTab, SIGNATURE,
+};
+pub use layout::{
+    render_tab, Range, RenderedTab, Style, Validation, BLOCK_PALETTE, COLUMN_WIDTHS, ID_COLUMN,
+    STATUSES,
 };
 
 use chrono::{Datelike, NaiveDate};
@@ -53,9 +60,14 @@ const MONTH_NAMES: [&str; 12] = [
     "DEZEMBRO",
 ];
 
+/// Month name as written on the tab, e.g. `NOVEMBRO`.
+pub fn month_name(month: NaiveDate) -> &'static str {
+    MONTH_NAMES[month.month0() as usize]
+}
+
 /// Tab title for a month, e.g. `NOVEMBRO 2026`.
 pub fn tab_title(month: NaiveDate) -> String {
-    format!("{} {}", MONTH_NAMES[month.month0() as usize], month.year())
+    format!("{} {}", month_name(month), month.year())
 }
 
 /// Inverse of [`tab_title`]: the first day of the month a title names.
@@ -65,8 +77,7 @@ pub fn month_from_title(title: &str) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(year.parse().ok()?, month, 1)
 }
 
-/// The block a row belongs to. Totals and the month balance are formulas
-/// over these blocks, so the order here is the order on the tab.
+/// The block a row belongs to, in the order they appear on the tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Expenses,
@@ -77,6 +88,7 @@ pub enum Section {
 impl Section {
     pub const ALL: [Section; 3] = [Section::Expenses, Section::Cards, Section::Income];
 
+    /// Stable name of the block in the manifest.
     pub fn title(self) -> &'static str {
         match self {
             Section::Expenses => "DESPESAS",
@@ -85,11 +97,12 @@ impl Section {
         }
     }
 
+    /// Label of the row that closes the block on the tab.
     pub fn total_label(self) -> &'static str {
         match self {
-            Section::Expenses => "Total despesas",
-            Section::Cards => "Total cartões",
-            Section::Income => "Total receitas",
+            Section::Expenses => "Subtotal fixas",
+            Section::Cards => "Total Cartão",
+            Section::Income => "Total Receitas",
         }
     }
 
@@ -126,13 +139,37 @@ pub struct SheetRow {
     pub editable: bool,
 }
 
+/// One card installment due in the month (`Parcelamentos Cartão`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstallmentLine {
+    pub item: String,
+    /// Short card name (`C`).
+    pub card: String,
+    /// This installment (`P`) of `total` (`T`).
+    pub number: u32,
+    pub total: u32,
+    pub amount: Decimal,
+}
+
+/// A category-wide budget: planned amount, the month's spend in the
+/// category and its largest purchases.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvelopeBlock {
+    pub title: String,
+    pub planned: Decimal,
+    pub actual: Decimal,
+    pub lines: Vec<(String, Decimal)>,
+}
+
 /// Everything rendered on one month tab.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonthTab {
     pub month: NaiveDate,
     pub rows: Vec<SheetRow>,
-    /// Actual spend per category label for the month, largest first.
-    pub category_actuals: Vec<(String, Decimal)>,
+    pub installments: Vec<InstallmentLine>,
+    /// `Débito / Dinheiro`: account spending that no row of the table covers.
+    pub debit: EnvelopeBlock,
+    pub envelopes: Vec<EnvelopeBlock>,
 }
 
 impl MonthTab {

@@ -32,24 +32,35 @@ type there as forecast changes, in an explicit sync.**
 - **Ownership.** The spreadsheet belongs to the person and is shared with the
   BigQuery service account as an editor; `planning_sheet_id` in `config.toml`
   names it. The client asks for the `spreadsheets` scope only.
-- **Tabs.** `phai sheets sync` writes the previous month, the current one and
-  the next `planning_sheet_months` (default 12), titled `NOVEMBRO 2026`. A tab
-  with a month title that phai did not create is never overwritten. Older tabs
-  stop being updated and remain as history. Two hidden tabs hold bookkeeping:
-  `_phai` (the manifest) and `_phai_listas` (dropdown sources).
-- **Layout.** Blocks `DESPESAS`, `CARTÕES`, `RECEITAS`; columns `Item | Previsto
-  | Realizado | Status | Dia | Repete | Categoria | Conta | Obs. | id`; totals
-  and the month balance are formulas; the month's spend per category sits
-  beside the table.
-- **Realizado.** A reconciled forecast shows its transaction; a category-wide
-  budget (no account) shows the month's spend in the category; a card row shows
-  the total of the billing cycle that closes in the month.
+- **Tabs.** `phai sheets sync` writes the current month and the next
+  `planning_sheet_months - 1` (default 12; a household that plans one month
+  at a time sets 1), titled `NOVEMBRO 2026`. A tab with a month title that
+  phai did not create is never overwritten, and tabs that leave the horizon
+  stay as history. Two hidden tabs hold bookkeeping: `_phai` (the manifest)
+  and `_phai_listas` (dropdown sources).
+- **Layout.** It follows the household's own month tab, cell for cell in
+  look: `A:E` is `Item | Previsto | Realizado | Status | Ve.` with fixed bills
+  and `Subtotal fixas`, one row per card and `Total Cartão`, `Total Despesas`,
+  `RECEITAS` and `Total Receitas`, `SALDO MES`, and `Fluxo Caixa` (income by
+  the 15th against what is due before it). `G:L` holds `Parcelamentos Cartão`
+  (`Conta | C | P | T | R | Valor`) and `Débito / Dinheiro`; `N:S` holds one
+  block per category budget, three per band, with `orçado`, `realizado` and
+  what is left. Totals are formulas. `V:Z` carry the fields phai needs to
+  round-trip a row (`Repete`, `Categoria`, `Conta`, `Obs.`, hidden `id`); phai's
+  note in `T1` marks the tab as phai's.
+- **Realizado.** A reconciled forecast shows its transaction; a card row shows
+  the total of the billing cycle that closes in the month; a category block
+  sums the month's purchases in the category by purchase date and lists the
+  largest; `Débito / Dinheiro` lists non-card spending no paid row covers.
+  `Status` uses the household's words (`Pago`, `Agendado`, `Previsto`,
+  `Atrasado`, `Cancelado`).
 - **Edits.** Each sync first reads the tabs, then rewrites them. The manifest
   records what the last sync rendered, so a row that still matches its snapshot
   was not touched (phai's current value wins) and a row that differs was edited
   (the edit wins). Typed rows become forecasts, deleted rows are discarded,
   edited rows are patched, and a card row's `Previsto` becomes a planned bill
-  forecast (`metadata.kind = card_budget`). Paid rows are read-only.
+  forecast (`metadata.kind = card_budget`). `Status = Cancelado` removes a
+  row too. Paid rows are read-only. Category blocks are read-only for now.
 - **Monthly series.** `Repete = mensal` creates one independent forecast per
   month, linked by `metadata.series_id`, and the series grows as the horizon
   moves. A change in one month flows to later months that still had the old
@@ -81,9 +92,9 @@ type there as forecast changes, in an explicit sync.**
 
 - New module pair in `phai-core` (`planning_sheet`, pure; `google_sheets`,
   HTTP) and in `phai-cli` (`planning_sheet_cmd`, `planning_sheet_apply`).
-- The person can change `Item`, `Previsto`, `Dia`, `Repete`, `Categoria`,
-  `Conta` and `Obs.`; any other cell on a month tab is rewritten on the next
-  sync, so free-form work belongs on other tabs. Edits typed while a sync is
+- The person can change `Item`, `Previsto`, `Ve.`, `Status` (to cancel),
+  `Repete`, `Categoria`, `Conta` and `Obs.`; any other cell on a month tab is
+  rewritten on the next sync, so free-form work belongs on other tabs. Edits typed while a sync is
   running can be lost.
 - A planned card bill coexists with the open-bill and installment forecasts of
   the same card. The sheet shows one of them per card; other planning views

@@ -1,46 +1,23 @@
-//! Lay a [`MonthTab`] out as spreadsheet cells and read edited cells back.
+//! Cells, and reading an edited month tab back.
 //!
-//! Columns: `Item | Previsto | Realizado | Status | Dia | Repete | Categoria |
-//! Conta | Obs. | id`, then the category actuals in `L:M`. Section totals
-//! and the month balance are formulas, so they stay live while a person
-//! edits between syncs.
+//! The layout itself lives in [`super::layout`]; this side walks a tab the
+//! way a person reads it (fixed bills until `Subtotal fixas`, cards until
+//! `Total Cartão`, income from `RECEITAS` to `Total Receitas`) and stops at
+//! `SALDO MES`, so rows inserted inside a block stay in that block.
 
 use rust_decimal::Decimal;
 use serde_json::Value;
 
 use super::diff::{ManifestEntry, RowSnapshot};
-use super::{MonthTab, Section, SheetRow, MONTHLY};
+use super::layout::{
+    BALANCE_LABEL, CANCELLED, COL_ACCOUNT, COL_CATEGORY, COL_DAY, COL_ITEM, COL_NOTES, COL_PLANNED,
+    COL_REPEATS, COL_STATUS, EXPENSES_TOTAL, ID_COLUMN, INCOME_TITLE, SIGNATURE_COL,
+};
+use super::{Section, MONTHLY};
 use crate::models::decimal_from_str;
 
-pub const HEADERS: [&str; 10] = [
-    "Item",
-    "Previsto",
-    "Realizado",
-    "Status",
-    "Dia",
-    "Repete",
-    "Categoria",
-    "Conta",
-    "Obs.",
-    "id",
-];
-/// Start of the note phai writes in `C1` of every month tab it owns.
+/// Start of the note phai writes in `T1` of every month tab it owns.
 pub const SIGNATURE: &str = "Atualizado pelo phai";
-const BALANCE_LABEL: &str = "SALDO DO MÊS";
-const ACTUALS_TITLE: &str = "REALIZADO POR CATEGORIA";
-/// Column index of the category actuals block (`L`).
-const ACTUALS_COL: usize = 11;
-/// Rows above the first section: title and header.
-const TOP_ROWS: usize = 2;
-
-const COL_ITEM: usize = 0;
-const COL_PLANNED: usize = 1;
-const COL_DAY: usize = 4;
-const COL_REPEATS: usize = 5;
-const COL_CATEGORY: usize = 6;
-const COL_ACCOUNT: usize = 7;
-const COL_NOTES: usize = 8;
-const COL_KEY: usize = 9;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
@@ -51,127 +28,25 @@ pub enum Cell {
 }
 
 impl Cell {
-    fn text(value: impl Into<String>) -> Cell {
+    pub(super) fn text(value: impl Into<String>) -> Cell {
         Cell::Text(value.into())
     }
 
-    fn opt_text(value: Option<&str>) -> Cell {
+    pub(super) fn opt_text(value: Option<&str>) -> Cell {
         value.map_or(Cell::Empty, Cell::text)
     }
 
-    fn opt_number(value: Option<Decimal>) -> Cell {
+    pub(super) fn opt_number(value: Option<Decimal>) -> Cell {
         value.map_or(Cell::Empty, |v| Cell::Number(v.round_dp(2)))
     }
 }
 
-/// A rendered tab plus the 0-based rows that should be bold (headers,
-/// section titles, totals and the balance).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderedTab {
-    pub cells: Vec<Vec<Cell>>,
-    pub bold_rows: Vec<usize>,
-}
-
-pub fn render_tab(tab: &MonthTab, updated_label: &str) -> RenderedTab {
-    let mut cells: Vec<Vec<Cell>> = vec![
-        vec![
-            Cell::text(tab.title()),
-            Cell::Empty,
-            Cell::text(updated_label),
-        ],
-        HEADERS.iter().map(|h| Cell::text(*h)).collect(),
-    ];
-    let mut bold_rows = vec![0, 1];
-    let mut totals = Vec::new();
-    for section in Section::ALL {
-        bold_rows.push(cells.len());
-        cells.push(vec![Cell::text(section.title())]);
-        let first = cells.len() + 1;
-        cells.extend(
-            tab.rows
-                .iter()
-                .filter(|r| r.section == section)
-                .map(row_cells),
-        );
-        // One empty line per block, so there is always room to type a new row.
-        cells.push(Vec::new());
-        let total_row = cells.len() + 1;
-        bold_rows.push(cells.len());
-        cells.push(vec![
-            Cell::text(section.total_label()),
-            sum_formula('B', first, total_row - 1),
-            sum_formula('C', first, total_row - 1),
-        ]);
-        cells.push(Vec::new());
-        totals.push(total_row);
-    }
-    bold_rows.push(cells.len());
-    let (expenses, cards, income) = (totals[0], totals[1], totals[2]);
-    cells.push(vec![
-        Cell::text(BALANCE_LABEL),
-        Cell::Formula(format!("=B{income}-B{expenses}-B{cards}")),
-        Cell::Formula(format!("=C{income}-C{expenses}-C{cards}")),
-    ]);
-    place_actuals(&mut cells, &tab.category_actuals);
-    RenderedTab { cells, bold_rows }
-}
-
-fn sum_formula(col: char, first: usize, last: usize) -> Cell {
-    Cell::Formula(format!("=SUM({col}{first}:{col}{last})"))
-}
-
-fn row_cells(row: &SheetRow) -> Vec<Cell> {
-    vec![
-        Cell::text(&row.item),
-        Cell::opt_number(row.planned),
-        Cell::opt_number(row.actual),
-        Cell::text(&row.status),
-        row.day
-            .map_or(Cell::Empty, |d| Cell::Number(Decimal::from(d))),
-        if row.repeats {
-            Cell::text(MONTHLY)
-        } else {
-            Cell::Empty
-        },
-        Cell::opt_text(row.category_id.as_deref()),
-        Cell::opt_text(row.account_id.as_deref()),
-        Cell::opt_text(row.notes.as_deref()),
-        Cell::text(&row.key),
-    ]
-}
-
-fn place_actuals(cells: &mut Vec<Vec<Cell>>, actuals: &[(String, Decimal)]) {
-    let mut block = vec![vec![Cell::text(ACTUALS_TITLE), Cell::text("Valor")]];
-    block.extend(
-        actuals
-            .iter()
-            .map(|(label, value)| vec![Cell::text(label), Cell::Number(value.round_dp(2))]),
-    );
-    let last = TOP_ROWS + actuals.len();
-    block.push(vec![
-        Cell::text("Total"),
-        Cell::Formula(format!("=SUM(M{}:M{last})", TOP_ROWS + 1)),
-    ]);
-    for (offset, pair) in block.into_iter().enumerate() {
-        let row_index = offset + 1;
-        while cells.len() <= row_index {
-            cells.push(Vec::new());
-        }
-        let row = &mut cells[row_index];
-        while row.len() < ACTUALS_COL {
-            row.push(Cell::Empty);
-        }
-        row.truncate(ACTUALS_COL);
-        row.extend(pair);
-    }
-}
-
-/// Whether a tab carries phai's note in `C1`, i.e. phai wrote it even if
+/// Whether a tab carries phai's note in `T1`, i.e. phai wrote it even if
 /// the manifest lost track of it.
 pub fn is_phai_tab(values: &[Vec<Value>]) -> bool {
     values
         .first()
-        .and_then(|row| text_at(row, 2))
+        .and_then(|row| text_at(row, SIGNATURE_COL))
         .is_some_and(|note| note.starts_with(SIGNATURE))
 }
 
@@ -182,28 +57,34 @@ pub struct ParsedRow {
     /// The `id` column; `None` for a row a person just typed.
     pub key: Option<String>,
     pub snapshot: RowSnapshot,
+    /// `Status` set to `Cancelado`: the person wants the row gone.
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ParsedTab {
-    /// How many of the three section titles were found. Anything short of
-    /// three means the layout was broken by hand and the tab is not trusted.
-    pub sections_found: usize,
+    /// False when a block's closing row is missing or renamed: the tab is
+    /// not trusted, so nothing on it is read as an edit.
+    pub layout_ok: bool,
     pub rows: Vec<ParsedRow>,
 }
 
+/// The rows that open and close blocks, in order.
+const MARKERS: usize = 4;
+
 pub fn parse_tab(values: &[Vec<Value>]) -> ParsedTab {
     let mut parsed = ParsedTab::default();
-    let mut current: Option<Section> = None;
-    for row in values.iter().skip(TOP_ROWS) {
+    let mut current = Some(Section::Expenses);
+    let mut markers = 0;
+    for row in values.iter().skip(1) {
         let first = text_at(row, COL_ITEM).unwrap_or_default();
         match line_kind(&first) {
-            Line::Title(section) => {
-                current = Some(section);
-                parsed.sections_found += 1;
+            Line::Boundary(next) => {
+                markers += 1;
+                current = next;
             }
-            Line::Total => current = None,
             Line::Balance => break,
+            Line::Other => current = None,
             Line::Data => {
                 if let Some(parsed_row) = current.and_then(|s| parse_row(s, first, row)) {
                     parsed.rows.push(parsed_row);
@@ -211,23 +92,34 @@ pub fn parse_tab(values: &[Vec<Value>]) -> ParsedTab {
             }
         }
     }
+    let header_ok = values
+        .first()
+        .and_then(|row| text_at(row, COL_PLANNED))
+        .is_some_and(|h| h == "Previsto");
+    parsed.layout_ok = header_ok && markers == MARKERS;
     parsed
 }
 
 enum Line {
-    Title(Section),
-    Total,
+    /// A block boundary, and the block that follows it, if any.
+    Boundary(Option<Section>),
     Balance,
+    /// `Total Despesas`: ends a block without being one of its markers.
+    Other,
     Data,
 }
 
 fn line_kind(first: &str) -> Line {
-    if let Some(section) = Section::from_title(first) {
-        Line::Title(section)
-    } else if first.starts_with("Total ") {
-        Line::Total
+    if first == Section::Expenses.total_label() {
+        Line::Boundary(Some(Section::Cards))
+    } else if first == Section::Cards.total_label() || first == Section::Income.total_label() {
+        Line::Boundary(None)
+    } else if first == INCOME_TITLE {
+        Line::Boundary(Some(Section::Income))
     } else if first == BALANCE_LABEL {
         Line::Balance
+    } else if first == EXPENSES_TOTAL {
+        Line::Other
     } else {
         Line::Data
     }
@@ -235,7 +127,7 @@ fn line_kind(first: &str) -> Line {
 
 /// A data line, or `None` for a blank one.
 fn parse_row(section: Section, item: String, row: &[Value]) -> Option<ParsedRow> {
-    let key = text_at(row, COL_KEY);
+    let key = text_at(row, ID_COLUMN);
     let snapshot = RowSnapshot {
         item,
         planned: decimal_at(row, COL_PLANNED),
@@ -246,10 +138,11 @@ fn parse_row(section: Section, item: String, row: &[Value]) -> Option<ParsedRow>
         notes: text_at(row, COL_NOTES),
     };
     let blank = key.is_none() && snapshot.item.is_empty() && snapshot.planned.is_none();
-    (!blank).then_some(ParsedRow {
+    (!blank).then(|| ParsedRow {
         section,
         key,
         snapshot,
+        cancelled: text_at(row, COL_STATUS).as_deref() == Some(CANCELLED),
     })
 }
 
@@ -272,13 +165,16 @@ fn decimal_at(row: &[Value], col: usize) -> Option<Decimal> {
     Some(value.abs().round_dp(2))
 }
 
-fn day_at(row: &[Value]) -> Option<u32> {
-    let day = decimal_at(row, COL_DAY)?
+fn whole_at(row: &[Value], col: usize) -> Option<u32> {
+    decimal_at(row, col)?
         .trunc()
         .to_string()
         .parse::<u32>()
-        .ok()?;
-    (1..=31).contains(&day).then_some(day)
+        .ok()
+}
+
+fn day_at(row: &[Value]) -> Option<u32> {
+    whole_at(row, COL_DAY).filter(|d| (1..=31).contains(d))
 }
 
 fn repeats_at(row: &[Value]) -> bool {
@@ -341,7 +237,7 @@ pub fn parse_manifest(values: &[Vec<Value>]) -> Vec<ManifestEntry> {
                 snapshot: RowSnapshot {
                     item: text_at(row, 3).unwrap_or_default(),
                     planned: decimal_at(row, 4),
-                    day: decimal_at(row, 5).and_then(|d| d.trunc().to_string().parse::<u32>().ok()),
+                    day: whole_at(row, 5),
                     repeats: text_at(row, 6).as_deref() == Some(MONTHLY),
                     category_id: text_at(row, 7),
                     account_id: text_at(row, 8),
@@ -367,8 +263,10 @@ pub fn render_lists(categories: &[String], accounts: &[String]) -> Vec<Vec<Cell>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::planning_sheet::layout::render_tab;
+    use crate::planning_sheet::{MonthTab, SheetRow};
     use chrono::NaiveDate;
     use serde_json::json;
 
@@ -397,97 +295,52 @@ mod tests {
                 row(Section::Cards, "card:c1", 4000),
                 row(Section::Income, "pay", 9000),
             ],
-            category_actuals: vec![("Moradia".to_string(), Decimal::new(4800, 0))],
+            installments: Vec::new(),
+            debit: crate::planning_sheet::EnvelopeBlock {
+                title: "Débito / Dinheiro".to_string(),
+                planned: Decimal::ZERO,
+                actual: Decimal::ZERO,
+                lines: Vec::new(),
+            },
+            envelopes: Vec::new(),
         }
     }
 
-    /// What the Sheets API hands back for a rendered grid (formulas as
-    /// computed numbers are irrelevant to parsing, so they become strings).
-    fn as_values(cells: &[Vec<Cell>]) -> Vec<Vec<Value>> {
+    /// What the Sheets API hands back for a rendered grid.
+    pub(crate) fn as_values(cells: &[Vec<Cell>]) -> Vec<Vec<Value>> {
         cells
             .iter()
             .map(|row| {
                 row.iter()
                     .map(|c| match c {
                         Cell::Empty => json!(""),
-                        Cell::Text(t) => json!(t),
+                        Cell::Text(t) | Cell::Formula(t) => json!(t),
                         Cell::Number(n) => serde_json::from_str(&n.to_string()).unwrap(),
-                        Cell::Formula(f) => json!(f),
                     })
                     .collect()
             })
             .collect()
     }
 
-    #[test]
-    fn render_lays_out_sections_totals_and_balance() {
-        let rendered = render_tab(&tab(), "atualizado");
-        let col_a: Vec<String> = rendered
-            .cells
-            .iter()
-            .map(|r| match r.first() {
-                Some(Cell::Text(t)) => t.clone(),
-                _ => String::new(),
-            })
-            .collect();
-        assert_eq!(
-            col_a,
-            vec![
-                "MAIO 2030",
-                "Item",
-                "DESPESAS",
-                "item rent",
-                "",
-                "Total despesas",
-                "",
-                "CARTÕES",
-                "item card:c1",
-                "",
-                "Total cartões",
-                "",
-                "RECEITAS",
-                "item pay",
-                "",
-                "Total receitas",
-                "",
-                "SALDO DO MÊS",
-            ]
-        );
-        assert_eq!(
-            rendered.cells[5][1],
-            Cell::Formula("=SUM(B4:B5)".to_string())
-        );
-        assert_eq!(
-            rendered.cells[17][1],
-            Cell::Formula("=B16-B6-B11".to_string())
-        );
-        assert_eq!(rendered.bold_rows, vec![0, 1, 2, 5, 7, 10, 12, 15, 17]);
+    fn rendered() -> Vec<Vec<Value>> {
+        as_values(&render_tab(&tab(), &format!("{SIGNATURE} em 01/05/2030")).cells)
     }
 
-    #[test]
-    fn render_places_category_actuals_beside_the_table() {
-        let rendered = render_tab(&tab(), "atualizado");
-        assert_eq!(rendered.cells[1][11], Cell::text("REALIZADO POR CATEGORIA"));
-        assert_eq!(rendered.cells[2][11], Cell::text("Moradia"));
-        assert_eq!(rendered.cells[2][12], Cell::Number(Decimal::new(4800, 0)));
-        assert_eq!(
-            rendered.cells[3][12],
-            Cell::Formula("=SUM(M3:M3)".to_string())
-        );
-        assert_eq!(
-            rendered.cells[3][0],
-            Cell::text("item rent"),
-            "left side intact"
-        );
+    fn row_of(values: &[Vec<Value>], label: &str) -> usize {
+        values
+            .iter()
+            .position(|r| r.first() == Some(&json!(label)))
+            .unwrap()
     }
 
     #[test]
     fn parse_reads_back_what_render_wrote() {
-        let values = as_values(&render_tab(&tab(), "atualizado").cells);
-        let parsed = parse_tab(&values);
-        assert_eq!(parsed.sections_found, 3);
+        let parsed = parse_tab(&rendered());
+        assert!(parsed.layout_ok);
         let keys: Vec<_> = parsed.rows.iter().map(|r| r.key.clone().unwrap()).collect();
         assert_eq!(keys, vec!["rent", "card:c1", "pay"]);
+        let sections: Vec<_> = parsed.rows.iter().map(|r| r.section).collect();
+        assert_eq!(sections, Section::ALL.to_vec());
         let rent = &parsed.rows[0].snapshot;
         assert_eq!(rent.planned, Some(Decimal::new(5000, 0)));
         assert_eq!(rent.day, Some(5));
@@ -497,9 +350,9 @@ mod tests {
 
     #[test]
     fn parse_picks_up_a_typed_row_and_ignores_blank_lines() {
-        let mut values = as_values(&render_tab(&tab(), "atualizado").cells);
-        // Type into the empty line under the expense row.
-        values[4] = vec![
+        let mut values = rendered();
+        let typed = row_of(&values, "Subtotal fixas") - 1;
+        values[typed] = vec![
             json!("Natação"),
             json!("440,00"),
             json!(""),
@@ -516,10 +369,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_counts_missing_sections() {
-        let mut values = as_values(&render_tab(&tab(), "atualizado").cells);
-        values[7] = vec![json!("cartoes renomeado")];
-        assert_eq!(parse_tab(&values).sections_found, 2);
+    fn cancelado_in_status_marks_the_row() {
+        let mut values = rendered();
+        values[1][COL_STATUS] = json!("Cancelado");
+        assert!(parse_tab(&values).rows[0].cancelled);
+    }
+
+    #[test]
+    fn a_renamed_block_end_breaks_the_layout() {
+        let mut values = rendered();
+        let cards_total = row_of(&values, "Total Cartão");
+        values[cards_total][0] = json!("Cartões");
+        assert!(!parse_tab(&values).layout_ok);
+    }
+
+    #[test]
+    fn phai_tabs_are_recognised_by_the_note_in_t1() {
+        assert!(is_phai_tab(&rendered()));
+        assert!(!is_phai_tab(&[vec![json!("meu rascunho")]]));
+        assert!(!is_phai_tab(&[]));
     }
 
     #[test]
@@ -541,14 +409,6 @@ mod tests {
         }];
         let values = as_values(&render_manifest(&entries));
         assert_eq!(parse_manifest(&values), entries);
-    }
-
-    #[test]
-    fn phai_tabs_are_recognised_by_the_note_in_c1() {
-        let ours = as_values(&render_tab(&tab(), &format!("{SIGNATURE} em 01/05/2030")).cells);
-        assert!(is_phai_tab(&ours));
-        assert!(!is_phai_tab(&[vec![json!("meu rascunho")]]));
-        assert!(!is_phai_tab(&[]));
     }
 
     #[test]

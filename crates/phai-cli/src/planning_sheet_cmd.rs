@@ -6,12 +6,12 @@
 //! the next ones up to the configured horizon. Runs on demand and after
 //! every Pluggy sync when `planning_sheet_id` is configured.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Local, Months, NaiveDate, Utc};
 use clap::{Args, Subcommand};
-use phai_core::google_sheets::{HttpSheets, SheetsApi, TabFormat, TabWrite};
+use phai_core::google_sheets::{HttpSheets, MonthFormat, SheetsApi, TabFormat, TabWrite};
 use phai_core::migrations::run_migrations;
 use phai_core::planning_sheet::{
     build_month_tab, diff_tab, is_phai_tab, managed_tabs, manifest_entries, month_from_title,
@@ -19,11 +19,10 @@ use phai_core::planning_sheet::{
     ManifestEntry, MonthInputs, MonthTab, ParsedTab, SheetEdit, LISTS_TAB, MANIFEST_TAB, SIGNATURE,
 };
 use phai_core::storage::{open_store, FinanceStore};
-use phai_core::{AccountRecord, AppConfig, CardSummaryRow, CategoryRecord, MonthlySpendRow};
+use phai_core::{AccountRecord, AppConfig, CardSummaryRow, TransactionRecord};
 use rust_decimal::Decimal;
 use serde_json::Value;
 
-use crate::human_format::{capitalize_first, family_label};
 use crate::load_config;
 use crate::planning_sheet_apply::{flush, WorkingSet, WorkingSetInit};
 
@@ -213,16 +212,13 @@ pub(crate) async fn sync_planning_sheet(
     Ok(report)
 }
 
-/// The previous month, the current one and the next `months - 1`.
+/// The current month and the next `months - 1`.
 fn horizon(today: NaiveDate, months: u32) -> Result<Vec<NaiveDate>> {
     let current =
         NaiveDate::from_ymd_opt(today.year(), today.month(), 1).context("mês atual inválido")?;
-    let start = current
-        .checked_sub_months(Months::new(1))
-        .context("mês anterior inválido")?;
-    (0..=months.max(1))
+    (0..months.max(1))
         .map(|offset| {
-            start
+            current
                 .checked_add_months(Months::new(offset))
                 .context("mês do horizonte inválido")
         })
@@ -290,7 +286,6 @@ async fn unclaimed_tabs(
 /// What phai knows beyond forecasts: categories, accounts and cards.
 struct SheetContext {
     category_ids: BTreeSet<String>,
-    category_labels: HashMap<String, String>,
     account_ids: BTreeSet<String>,
     cards: Vec<CreditCard>,
     internal: BTreeSet<String>,
@@ -298,18 +293,12 @@ struct SheetContext {
 
 impl SheetContext {
     async fn load(store: &dyn FinanceStore, config: &AppConfig) -> Result<Self> {
-        let categories = store.get_categories().await.context("get_categories")?;
-        let category_labels = categories
-            .iter()
-            .map(|c| (c.category_id.clone(), category_label(c)))
-            .collect();
         let accounts = store.get_accounts().await.context("get_accounts")?;
         Ok(Self {
             category_ids: store
                 .list_all_category_ids()
                 .await
                 .context("list_all_category_ids")?,
-            category_labels,
             account_ids: accounts.iter().map(|a| a.account_id.clone()).collect(),
             cards: accounts
                 .iter()
@@ -321,18 +310,6 @@ impl SheetContext {
                 .await
                 .context("internal_categories")?,
         })
-    }
-}
-
-/// `Alimentação › Restaurantes` from the category's family and its name.
-fn category_label(category: &CategoryRecord) -> String {
-    match category.parent_category_id.as_deref() {
-        Some(parent) => format!(
-            "{} › {}",
-            family_label(parent),
-            capitalize_first(&category.name)
-        ),
-        None => family_label(&category.category_id),
     }
 }
 
@@ -366,7 +343,22 @@ async fn render_months(
     today: NaiveDate,
 ) -> Result<Vec<MonthTab>> {
     let card_totals = store.card_summary(None).await.context("card_summary")?;
-    let spend = store.monthly_spend(None).await.context("monthly_spend")?;
+    let (first, last) = (months[0], months[months.len() - 1]);
+    let until = last
+        .checked_add_months(Months::new(1))
+        .and_then(|d| d.pred_opt())
+        .unwrap_or(last);
+    let transactions: Vec<TransactionRecord> = store
+        .effective_transactions_window(None, first, until)
+        .await
+        .context("effective_transactions_window")?
+        .into_iter()
+        .filter(|t| {
+            !t.category_id
+                .as_ref()
+                .is_some_and(|c| context.internal.contains(c))
+        })
+        .collect();
     let closed = set.closed_series();
     let forecasts: Vec<_> = set.forecasts.values().cloned().collect();
     Ok(months
@@ -386,35 +378,22 @@ async fn render_months(
                 .filter(|t| t.month_ref == month_ref)
                 .cloned()
                 .collect();
-            let category_spend = spend_in(&spend, &month_ref, &context.internal);
+            let month_transactions: Vec<TransactionRecord> = transactions
+                .iter()
+                .filter(|t| t.transaction_date.format("%Y-%m").to_string() == month_ref)
+                .cloned()
+                .collect();
             build_month_tab(&MonthInputs {
                 month: *month,
                 today,
                 forecasts: &in_month,
                 cards: &context.cards,
                 card_totals: &totals,
-                category_spend: &category_spend,
-                category_labels: &context.category_labels,
+                transactions: &month_transactions,
                 closed_series: &closed,
             })
         })
         .collect())
-}
-
-/// Spend per category in the month, internal moves left out.
-fn spend_in(
-    rows: &[MonthlySpendRow],
-    month_ref: &str,
-    internal: &BTreeSet<String>,
-) -> Vec<(String, Decimal)> {
-    let mut totals: HashMap<String, Decimal> = HashMap::new();
-    for row in rows.iter().filter(|r| r.month_ref == month_ref) {
-        if internal.contains(&row.category_id) || row.category_id.is_empty() {
-            continue;
-        }
-        *totals.entry(row.category_id.clone()).or_default() += row.expenses.abs();
-    }
-    totals.into_iter().collect()
 }
 
 fn tab_writes(
@@ -424,7 +403,7 @@ fn tab_writes(
     now: DateTime<Utc>,
 ) -> Vec<TabWrite> {
     let label = format!(
-        "{SIGNATURE} em {}. Edite Item, Previsto, Dia, Repete, Categoria, Conta e Obs.",
+        "{SIGNATURE} em {}",
         now.with_timezone(&Local).format("%d/%m/%Y %H:%M")
     );
     let ours: Vec<&MonthTab> = tabs
@@ -439,9 +418,11 @@ fn tab_writes(
                 title: tab.title(),
                 cells: rendered.cells,
                 hidden: false,
-                format: TabFormat::Month {
-                    bold_rows: rendered.bold_rows,
-                },
+                format: TabFormat::Month(MonthFormat {
+                    styles: rendered.styles,
+                    merges: rendered.merges,
+                    validations: rendered.validations,
+                }),
             }
         })
         .collect();
@@ -494,8 +475,8 @@ fn describe(edit: &SheetEdit) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use phai_core::planning_sheet::Cell;
-    use phai_core::ForecastRecord;
+    use phai_core::planning_sheet::{Cell, ID_COLUMN};
+    use phai_core::{CategoryRecord, ForecastRecord};
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -645,21 +626,15 @@ mod tests {
         let report = sync_planning_sheet(store.as_ref(), &sheet, &config, &options())
             .await
             .unwrap();
-        assert_eq!(report.tabs_written, 3);
+        assert_eq!(report.tabs_written, 2);
         let titles = sheet.tab_titles().await.unwrap();
-        for title in [
-            "ABRIL 2030",
-            "MAIO 2030",
-            "JUNHO 2030",
-            MANIFEST_TAB,
-            LISTS_TAB,
-        ] {
+        for title in ["MAIO 2030", "JUNHO 2030", MANIFEST_TAB, LISTS_TAB] {
             assert!(titles.contains(&title.to_string()), "{title} missing");
         }
         let may = sheet.grid("MAIO 2030");
         let rent = &may[row_index(&may, "Aluguel")];
         assert_eq!(rent[1], json!(5000));
-        assert_eq!(rent[9], json!("aluguel-maio"));
+        assert_eq!(rent[ID_COLUMN], json!("aluguel-maio"));
         let card = &may[row_index(&may, "Conta cartao_a")];
         assert_eq!(card[4], json!(17), "card row carries its due day");
     }
@@ -675,15 +650,13 @@ mod tests {
             let rent = row_index(grid, "Aluguel");
             grid[rent][1] = json!(5150);
             // The empty line under the expense rows takes a new monthly item.
-            let typed = row_index(grid, "Total despesas") - 1;
-            grid[typed] = vec![
-                json!("Natação"),
-                json!("440,00"),
-                json!(""),
-                json!(""),
-                json!(12),
-                json!("mensal"),
-            ];
+            let typed = row_index(grid, "Subtotal fixas") - 1;
+            let mut line = vec![json!(""); ID_COLUMN + 1];
+            line[0] = json!("Natação");
+            line[1] = json!("440,00");
+            line[4] = json!(12);
+            line[21] = json!("mensal");
+            grid[typed] = line;
             let card = row_index(grid, "Conta cartao_a");
             grid[card][1] = json!(4000);
         });
@@ -705,7 +678,7 @@ mod tests {
             .unwrap();
         assert_eq!(card.amount, Decimal::new(-4000, 0));
         let june = sheet.grid("JUNHO 2030");
-        assert_eq!(june[row_index(&june, "Natação")][5], json!("mensal"));
+        assert_eq!(june[row_index(&june, "Natação")][21], json!("mensal"));
 
         let quiet = sync_planning_sheet(store.as_ref(), &sheet, &config, &options())
             .await
@@ -726,7 +699,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sheet.grid("MAIO 2030"), vec![vec![json!("meu rascunho")]]);
-        assert_eq!(report.tabs_written, 2);
+        assert_eq!(report.tabs_written, 1);
         assert!(report.warnings.iter().any(|w| w.contains("MAIO 2030")));
     }
 
@@ -746,7 +719,7 @@ mod tests {
             .await
             .unwrap();
         assert!(report.edits.is_empty());
-        assert_eq!(report.tabs_written, 3);
+        assert_eq!(report.tabs_written, 2);
         assert!(report.warnings.iter().any(|w| w.contains("registro _phai")));
         let may = sheet.grid("MAIO 2030");
         assert_eq!(may[row_index(&may, "Aluguel")][1], json!(5000));
@@ -780,29 +753,9 @@ mod tests {
     }
 
     #[test]
-    fn category_label_reads_family_then_name() {
-        let category = |id: &str, name: &str, parent: Option<&str>| CategoryRecord {
-            category_id: id.to_string(),
-            name: name.to_string(),
-            parent_category_id: parent.map(str::to_string),
-            metadata_json: json!({}),
-            actor_id: "t".to_string(),
-            updated_at: Utc::now(),
-        };
-        assert_eq!(
-            category_label(&category(
-                "alimentacao:restaurantes",
-                "restaurantes",
-                Some("alimentacao")
-            )),
-            "Alimentação › Restaurantes"
-        );
-        assert_eq!(category_label(&category("saude", "saude", None)), "Saúde");
-    }
-
-    #[test]
-    fn horizon_runs_from_last_month_through_the_requested_months() {
+    fn horizon_runs_from_this_month_through_the_requested_months() {
         let months = horizon(d(2030, 12, 20), 2).unwrap();
-        assert_eq!(months, vec![d(2030, 11, 1), d(2030, 12, 1), d(2031, 1, 1)]);
+        assert_eq!(months, vec![d(2030, 12, 1), d(2031, 1, 1)]);
+        assert_eq!(horizon(d(2030, 12, 20), 1).unwrap(), vec![d(2030, 12, 1)]);
     }
 }
