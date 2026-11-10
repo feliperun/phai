@@ -2,6 +2,11 @@ name: Release Please
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Rebuild the assets of an existing release tag (e.g. v5.43.0); empty runs Release Please"
+        required: false
+        default: ""
   push:
     branches: [main]
 
@@ -14,16 +19,31 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      # For the root package (path "."), release-please-action emits outputs
-      # WITHOUT a path prefix — see setPathOutput in the action source.
-      phai-cli-released: ${{ steps.release.outputs.release_created }}
-      phai-cli-tag: ${{ steps.release.outputs.tag_name }}
+      phai-cli-released: ${{ steps.target.outputs.released }}
+      phai-cli-tag: ${{ steps.target.outputs.tag }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
+        if: inputs.tag == ''
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      # For the root package (path "."), release-please-action emits outputs
+      # WITHOUT a path prefix — see setPathOutput in the action source. A
+      # dispatched tag skips Release Please and rebuilds that release's assets.
+      - id: target
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=$RELEASED" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASED: ${{ steps.release.outputs.release_created }}
+          TAG: ${{ steps.release.outputs.tag_name }}
 
   release-assets:
     needs: release-please
@@ -32,10 +52,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
             cross: false
-          - runner: macos-14
+          - runner: macos-15
             target: x86_64-apple-darwin
             cross: true
     runs-on: ${{ matrix.runner }}
@@ -97,7 +117,7 @@ jobs:
   desktop-app:
     needs: release-please
     if: needs.release-please.outputs.phai-cli-released == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
