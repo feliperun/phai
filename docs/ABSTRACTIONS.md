@@ -241,7 +241,7 @@ idempotency keys (`scenario-{scenario_id}-{change_id}`, ADR-0022).
 Action names use `entity.verb`:
 
 - `tx.upsert`, `tx.categorize`, `tx.set-context`, `tx.split.apply`, `tx.split.clear`
-- `rule.upsert`, `account.upsert`, `forecast.upsert`, `budget.upsert`
+- `rule.upsert`, `account.upsert`, `forecast.upsert`, `budget.upsert`, `category.upsert`
 - Planning sheet writes use actor `planning-sheet` and actions `sheet_create`, `sheet_update`, `sheet_discard`, `sheet_card_plan`, `sheet_series_extend`, `sheet_series_end`
 - `sync.pluggy`, `import.legacy`
 

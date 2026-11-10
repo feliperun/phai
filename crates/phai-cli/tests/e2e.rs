@@ -7038,6 +7038,116 @@ fn sync_without_registry_keeps_curated_account_identity() {
     assert_eq!(account_identity(&data_dir, "primary_checking"), curated);
 }
 
+fn category_name(data_dir: &Path, category_id: &str) -> (String, Option<String>) {
+    let conn = Connection::open(data_dir.join("phai.local.db")).expect("open db");
+    conn.query_row(
+        "SELECT name, parent_category_id FROM categories WHERE category_id = ?1",
+        [category_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("category row")
+}
+
+#[test]
+fn curated_category_names_survive_the_next_sync() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    let taxonomy = temp.path().join("taxonomia.csv");
+    write_file(
+        &taxonomy,
+        "id,name\nalimentacao,Alimentação fora\nalimentacao:mercado,Supermercado\nmercado,Mercado\n",
+    );
+    envs(
+        cargo_bin()
+            .arg("category")
+            .arg("upsert")
+            .arg("--file")
+            .arg(&taxonomy),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("3 categoria(s)"));
+    envs(
+        cargo_bin()
+            .arg("category")
+            .arg("upsert")
+            .arg("--id")
+            .arg("mercado:supermercado")
+            .arg("--name")
+            .arg("Supermercado"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    envs(
+        cargo_bin()
+            .arg("sync")
+            .arg("pluggy")
+            .arg("--pluggy-config")
+            .arg(temp.path().join("pluggy-config.json"))
+            .arg("--fixture")
+            .arg(repo_root().join("examples/pluggy_fixture.json"))
+            .arg("--to")
+            .arg("2026-03-31"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+
+    assert_eq!(
+        category_name(&data_dir, "alimentacao:mercado"),
+        ("Supermercado".to_string(), Some("alimentacao".to_string()))
+    );
+    assert_eq!(
+        category_name(&data_dir, "alimentacao").0,
+        "Alimentação fora"
+    );
+    assert_eq!(
+        category_name(&data_dir, "mercado:supermercado"),
+        ("Supermercado".to_string(), Some("mercado".to_string()))
+    );
+    envs(
+        cargo_bin().arg("category").arg("list"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("mercado:supermercado"))
+    .stdout(predicate::str::contains("Supermercado"));
+}
+
+#[test]
+fn category_upsert_rejects_ids_that_are_not_slugs() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    envs(
+        cargo_bin()
+            .arg("category")
+            .arg("upsert")
+            .arg("--id")
+            .arg("Moradia:Água")
+            .arg("--name")
+            .arg("Água"),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("slug"));
+}
+
 #[test]
 fn sync_reads_pluggy_paths_from_runtime_config() {
     let temp = TempDir::new().expect("tempdir");
