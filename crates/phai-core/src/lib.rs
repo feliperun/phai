@@ -3,6 +3,7 @@ pub mod category_aliases;
 pub mod compat;
 pub mod config;
 pub mod enrichment;
+pub mod google_sheets;
 pub mod idempotency;
 pub mod installments;
 pub mod invite;
