@@ -1,5 +1,22 @@
 # Changelog
 
+## [5.43.0](https://github.com/feliperun/phai/compare/v5.42.2...v5.43.0) (2026-11-10)
+
+
+### Features
+
+* **planning-sheet:** build, render, parse and diff monthly planning tabs ([1045623](https://github.com/feliperun/phai/commit/1045623c1422647e009bad6b6e0f10c6a1c26052))
+* **planning-sheet:** Google Sheets API client over the service account ([59ac499](https://github.com/feliperun/phai/commit/59ac499b35eb245cd3e27c18fb63f342119e228c))
+* **planning-sheet:** lay month tabs out like the household month tab ([4f67fc7](https://github.com/feliperun/phai/commit/4f67fc7426599e0a12d9aff894d256fa4000c51b))
+* **planning-sheet:** phai sheets sync imports month-tab edits as forecasts ([fc8aa8c](https://github.com/feliperun/phai/commit/fc8aa8c7f922a01a15bea00e355cd12aad0e7fff))
+
+
+### Bug Fixes
+
+* **deps:** bundle SQLite 3.54 via rusqlite 0.41 (RUSTSEC-2026-0459) ([9200501](https://github.com/feliperun/phai/commit/9200501f183754b0fa450338eda73abcc505c82e))
+* **planning-sheet:** keep text literal and adopt phai tabs the manifest lost ([9c99835](https://github.com/feliperun/phai/commit/9c9983508c469572fcda95f7da24ad3fa12e1954))
+* **planning-sheet:** undo old merges before writing and name who was paid ([b3a5dd1](https://github.com/feliperun/phai/commit/b3a5dd17ce0b657d3d442f44e2073b38c3489464))
+
 ## [5.42.2](https://github.com/feliperun/phai/compare/v5.42.1...v5.42.2) (2026-11-04)
 
 
