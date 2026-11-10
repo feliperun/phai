@@ -211,6 +211,7 @@ phai tx propagate-installments  Name installments from a named sibling of the sa
 phai tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 phai tx split <subcommand>   Split a transaction into multiple lines
 phai forecast upsert         Create or update a forecast entry
+phai sheets sync             Import edits from the planning sheet (one Google Sheets tab per month) as forecasts, then rewrite its tabs (also runs after sync; --dry-run)
 phai forecast refresh        Full pipeline: installments + reconcile + materialise + suggest
 phai forecast refresh-installments  Layer 1 only: detect parcela chains and materialise
 phai forecast reconcile      Match active forecasts to recent transactions (sets realizado)
@@ -284,6 +285,8 @@ Beyond `auth setup`, a few optional keys in `config.toml` tune the web app (`pha
 | `pluggy_env_path` | Path to a dotenv with `PLUGGY_CLIENT_ID` / `PLUGGY_CLIENT_SECRET`, loaded into the sync subprocess at request time (creds stay off the daemon plist). |
 | `locked_categories` | List of category ids (`parent` or `parent:sub`) treated as fixed/committed (rent, school, fixed bills). They're served with a `locked` tier — dropped from planning and shown with 🔒 — for past *and* future transactions. A per-transaction tier override still wins. |
 | `account_labels` | Map of `account_id` → friendly display name, overriding the raw bank label from Pluggy (useful when a household's accounts share the same label). Surfaced in the per-account balances. |
+| `planning_sheet_id` | Id of a Google Sheets spreadsheet you own (the part between `/d/` and `/edit` in its URL), shared with the BigQuery service account as an editor. `phai sheets sync` and every Pluggy sync keep one tab per month there: `Previsto` and `Realizado` per bill, card and income, with totals as formulas. Edits to `Item`, `Previsto`, `Dia`, `Repete` (`mensal`), `Categoria`, `Conta` and `Obs.` come back as forecasts; see ADR-0041. |
+| `planning_sheet_months` | Month tabs the planning sheet carries from the current month on (the previous month is kept too). Default `12`. |
 
 ```toml
 locked_categories = ["moradia:aluguel", "educacao:escola"]

@@ -62,11 +62,30 @@ pub struct TabDiff {
     pub warnings: Vec<String>,
 }
 
+/// Manifest key that marks a tab as written by phai, even when it is empty.
+pub const TAB_MARKER: &str = "#aba";
+
+/// The month tabs a previous sync wrote. A tab with a month title that is
+/// not listed here belongs to the person and is never overwritten.
+pub fn managed_tabs(manifest: &[ManifestEntry]) -> BTreeSet<String> {
+    manifest
+        .iter()
+        .filter(|e| e.key == TAB_MARKER)
+        .map(|e| e.tab.clone())
+        .collect()
+}
+
 pub fn manifest_entries(tab: &MonthTab) -> Vec<ManifestEntry> {
     let title = tab.title();
-    tab.rows
-        .iter()
-        .map(|row| ManifestEntry {
+    let marker = ManifestEntry {
+        tab: title.clone(),
+        key: TAB_MARKER.to_string(),
+        section: Section::Expenses,
+        snapshot: RowSnapshot::default(),
+        editable: false,
+    };
+    std::iter::once(marker)
+        .chain(tab.rows.iter().map(|row| ManifestEntry {
             tab: title.clone(),
             key: row.key.clone(),
             section: row.section,
@@ -80,7 +99,7 @@ pub fn manifest_entries(tab: &MonthTab) -> Vec<ManifestEntry> {
                 notes: row.notes.clone(),
             },
             editable: row.editable,
-        })
+        }))
         .collect()
 }
 
@@ -225,6 +244,19 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn manifest_marks_every_written_tab_even_when_empty() {
+        let tab = MonthTab {
+            month: chrono::NaiveDate::from_ymd_opt(2030, 5, 1).unwrap(),
+            rows: Vec::new(),
+            category_actuals: Vec::new(),
+        };
+        let entries = manifest_entries(&tab);
+        assert_eq!(managed_tabs(&entries), [TAB.to_string()].into());
+        let edits = diff_tab(TAB, &parsed(Vec::new()), &entries).edits;
+        assert!(edits.is_empty(), "the marker is never a removal");
     }
 
     #[test]

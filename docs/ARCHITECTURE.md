@@ -55,6 +55,7 @@ flowchart LR
     BQ[("BigQuery\nproduction backend")]
     Pluggy["🏦 Pluggy API\n(open finance aggregator)"]
     Releases["📦 GitHub Releases\n(self-update target)"]
+    Sheet["📄 Planning sheet\n(Google Sheets, owned by the user)"]
 
     User -->|"shell + pipes"| CLI
     CLI -->|"FinanceStore trait"| Core
@@ -62,6 +63,7 @@ flowchart LR
     Core -->|"REST + service-account JWT"| BQ
     Core -->|"REST + HMAC"| Pluggy
     CLI -.->|"24h check, SHA-256 verify, atomic rename"| Releases
+    Core <-->|"Sheets API + service-account JWT\n(month tabs ⇄ forecasts, ADR-0041)"| Sheet
 
     style SQLite fill:#d4edda,stroke:#28a745,color:#000
     style BQ fill:#cce5ff,stroke:#004085,color:#000
@@ -159,6 +161,10 @@ sequenceDiagram
 ```
 
 Idempotency keys are derived from the Pluggy payload in `idempotency.rs`. Re-running `sync` is safe — `upsert_transactions` does not duplicate.
+
+### Planning sheet (store ⇄ Google Sheets)
+
+When `planning_sheet_id` is set, the end of every Pluggy sync (and `phai sheets sync`) reads the month tabs, diffs each row against the hidden `_phai` manifest the previous run wrote, applies the person's edits to the forecasts of the window in memory (series members included), flushes them with one `upsert_forecasts` and one audit event per forecast, then rewrites every month tab and the manifest from the store. `planning_sheet` (core) is pure; `google_sheets` is the HTTP seam. See ADR-0041.
 
 ### Report
 

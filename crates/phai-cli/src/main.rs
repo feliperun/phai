@@ -37,6 +37,8 @@ mod forecast_cmd;
 mod human_format;
 mod installment_anatomy;
 mod mcp;
+mod planning_sheet_apply;
+mod planning_sheet_cmd;
 mod pulse;
 mod scenario_cmd;
 mod self_cmd;
@@ -124,6 +126,12 @@ enum Commands {
     Scenario {
         #[command(subcommand)]
         command: scenario_cmd::ScenarioCommand,
+    },
+    /// Household planning sheet in Google Sheets: one tab per month whose
+    /// edits become forecasts (ADR-0041).
+    Sheets {
+        #[command(subcommand)]
+        command: planning_sheet_cmd::SheetsCommand,
     },
     Rule {
         #[command(subcommand)]
@@ -3158,6 +3166,21 @@ async fn main() -> Result<()> {
     run_command(cli.command).await
 }
 
+async fn run_forecast_command(command: ForecastCommand) -> Result<()> {
+    match command {
+        ForecastCommand::Upsert(args) => forecast_upsert(*args).await,
+        ForecastCommand::RefreshInstallments(args) => {
+            forecast_cmd::run_refresh_installments(args).await
+        }
+        ForecastCommand::Refresh(args) => forecast_cmd::run_refresh(args).await,
+        ForecastCommand::Reconcile(args) => forecast_cmd::run_reconcile(args).await,
+        ForecastCommand::Suggest(args) => forecast_cmd::run_suggest(args).await,
+        ForecastCommand::Accept(args) => forecast_cmd::run_accept(args).await,
+        ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
+        ForecastCommand::Scenario(args) => forecast_cmd::run_scenario(args).await,
+    }
+}
+
 async fn run_command(command: Option<Commands>) -> Result<()> {
     match command {
         None => {
@@ -3276,19 +3299,9 @@ async fn run_command(command: Option<Commands>) -> Result<()> {
                 installment_anatomy::tx_propagate_installments(args).await
             }
         },
-        Some(Commands::Forecast { command }) => match command {
-            ForecastCommand::Upsert(args) => forecast_upsert(*args).await,
-            ForecastCommand::RefreshInstallments(args) => {
-                forecast_cmd::run_refresh_installments(args).await
-            }
-            ForecastCommand::Refresh(args) => forecast_cmd::run_refresh(args).await,
-            ForecastCommand::Reconcile(args) => forecast_cmd::run_reconcile(args).await,
-            ForecastCommand::Suggest(args) => forecast_cmd::run_suggest(args).await,
-            ForecastCommand::Accept(args) => forecast_cmd::run_accept(args).await,
-            ForecastCommand::Dismiss(args) => forecast_cmd::run_dismiss(args).await,
-            ForecastCommand::Scenario(args) => forecast_cmd::run_scenario(args).await,
-        },
+        Some(Commands::Forecast { command }) => run_forecast_command(command).await,
         Some(Commands::Scenario { command }) => scenario_cmd::run(command).await,
+        Some(Commands::Sheets { command }) => planning_sheet_cmd::run(command).await,
         Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,
             RuleCommand::List(args) => rule_list(args).await,
@@ -3894,6 +3907,10 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
                 eprintln!("⚠️  Forecast refresh falhou (sync ainda OK): {err:#}");
             }
         }
+        // stderr: stdout carries the summary a script parses.
+        if let Some(line) = planning_sheet_cmd::sync_after_pluggy(store.as_ref(), &config).await {
+            eprintln!("{line}");
+        }
         let pending_summary = load_sync_pending_summary(
             store.as_ref(),
             &transactions,
@@ -4004,6 +4021,10 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
                 eprintln!("⚠️  Forecast refresh falhou (sync ainda OK): {err:#}");
             }
         }
+    }
+    // After the forecast refresh, so the sheet shows reconciled forecasts.
+    if let Some(line) = planning_sheet_cmd::sync_after_pluggy(store.as_ref(), &config).await {
+        println!("{line}");
     }
     Ok(())
 }

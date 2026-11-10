@@ -222,6 +222,10 @@ realized/removed become orphaned no-ops (recomputed on read, pruned only
 explicitly). Promotion applies the deltas to the real plan with natural
 idempotency keys (`scenario-{scenario_id}-{change_id}`, ADR-0022).
 
+## Planning Sheet (ADR-0041)
+
+`phai_core::planning_sheet` turns a month's forecasts, card cycles and category spend into a `MonthTab` (`build_month_tab`), lays it out as cells (`render_tab`), reads edited cells back (`parse_tab`) and compares them with the manifest the previous sync left (`diff_tab` → `SheetEdit::{Create, Update, Remove, CardPlan}`). The manifest marks the tabs phai owns (`TAB_MARKER`), so a month tab a person made is never overwritten. `google_sheets::SheetsApi` is the network seam (`HttpSheets` in production, a fake in tests). In the CLI, `planning_sheet_apply::WorkingSet` applies edits to the window's forecasts in memory: monthly series are independent forecasts sharing `metadata.series_id`, edits flow forward only to months still holding the old value, and rows typed in the sheet get content-derived ids so a retried sync never duplicates them.
+
 ## Config & Paths
 
 `config::ConfigPaths` resolves OS-appropriate config/data directories:
@@ -238,6 +242,7 @@ Action names use `entity.verb`:
 
 - `tx.upsert`, `tx.categorize`, `tx.set-context`, `tx.split.apply`, `tx.split.clear`
 - `rule.upsert`, `account.upsert`, `forecast.upsert`, `budget.upsert`
+- Planning sheet writes use actor `planning-sheet` and actions `sheet_create`, `sheet_update`, `sheet_discard`, `sheet_card_plan`, `sheet_series_extend`, `sheet_series_end`
 - `sync.pluggy`, `import.legacy`
 
 When adding a new write op, choose a name that fits this grammar. Replay tools and analytics depend on it being predictable.
