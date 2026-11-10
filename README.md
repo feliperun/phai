@@ -210,6 +210,8 @@ phai tx merge                Merge a duplicate manual transaction into its canon
 phai tx propagate-installments  Name installments from a named sibling of the same purchase (also runs after sync; --dry-run)
 phai tx set-context-by-desc  Deprecated alias for setting descriptions by raw match
 phai tx split <subcommand>   Split a transaction into multiple lines
+phai category list           Category tree: ids and the names reports and sheets show
+phai category upsert         Create or rename categories (--id/--name, or --file with id,name); sync never overwrites these names
 phai forecast upsert         Create or update a forecast entry
 phai sheets sync             Import edits from the planning sheet (one Google Sheets tab per month) as forecasts, then rewrite its tabs (also runs after sync; --dry-run)
 phai forecast refresh        Full pipeline: installments + reconcile + materialise + suggest

@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 mod cashflow_chart;
+mod category_cmd;
 mod enrich;
 mod forecast_cmd;
 mod human_format;
@@ -132,6 +133,11 @@ enum Commands {
     Sheets {
         #[command(subcommand)]
         command: planning_sheet_cmd::SheetsCommand,
+    },
+    /// Curated category list: ids and the names reports and sheets show.
+    Category {
+        #[command(subcommand)]
+        command: category_cmd::CategoryCommand,
     },
     Rule {
         #[command(subcommand)]
@@ -3302,6 +3308,7 @@ async fn run_command(command: Option<Commands>) -> Result<()> {
         Some(Commands::Forecast { command }) => run_forecast_command(command).await,
         Some(Commands::Scenario { command }) => scenario_cmd::run(command).await,
         Some(Commands::Sheets { command }) => planning_sheet_cmd::run(command).await,
+        Some(Commands::Category { command }) => category_cmd::run(command).await,
         Some(Commands::Rule { command }) => match command {
             RuleCommand::Upsert(args) => rule_upsert(args).await,
             RuleCommand::List(args) => rule_list(args).await,
@@ -3782,7 +3789,18 @@ async fn sync_pluggy_command(args: SyncPluggyArgs) -> Result<()> {
         }
     }
 
-    let categories = build_category_records_from_transactions(&config.actor_id, &transactions);
+    // Names of categories already in the store may be curated (`phai category
+    // upsert`): sync only adds the ones it has never seen.
+    let known: BTreeSet<String> = store
+        .get_categories()
+        .await?
+        .into_iter()
+        .map(|c| c.category_id)
+        .collect();
+    let categories = category_cmd::unseen_categories(
+        build_category_records_from_transactions(&config.actor_id, &transactions),
+        &known,
+    );
     let mut audit = Vec::new();
 
     upsert_accounts_chunked(store.as_ref(), &accounts).await?;
