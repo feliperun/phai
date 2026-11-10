@@ -105,10 +105,10 @@ pub fn manifest_entries(tab: &MonthTab) -> Vec<ManifestEntry> {
 
 pub fn diff_tab(title: &str, parsed: &ParsedTab, manifest: &[ManifestEntry]) -> TabDiff {
     let mut diff = TabDiff::default();
-    if parsed.sections_found < Section::ALL.len() {
+    if !parsed.layout_ok {
         diff.warnings.push(format!(
-            "{title}: os blocos DESPESAS, CARTÕES e RECEITAS não estão todos na aba; \
-             as edições dela foram ignoradas"
+            "{title}: falta o cabeçalho ou uma das linhas Subtotal fixas, Total Cartão, \
+             RECEITAS e Total Receitas; as edições dessa aba foram ignoradas"
         ));
         return diff;
     }
@@ -127,8 +127,15 @@ pub fn diff_tab(title: &str, parsed: &ParsedTab, manifest: &[ManifestEntry]) -> 
         match entry {
             Some(entry) => {
                 seen.insert(entry.key.as_str());
-                diff_known(title, entry, row.section, &row.snapshot, &mut diff);
+                if row.cancelled && entry.editable && entry.section != Section::Cards {
+                    diff.edits.push(SheetEdit::Remove {
+                        key: entry.key.clone(),
+                    });
+                } else {
+                    diff_known(title, entry, row.section, &row.snapshot, &mut diff);
+                }
             }
+            None if row.cancelled => {}
             None => diff_new(title, row.section, &row.snapshot, &mut diff),
         }
     }
@@ -234,13 +241,14 @@ mod tests {
 
     fn parsed(rows: Vec<(Section, Option<&str>, RowSnapshot)>) -> ParsedTab {
         ParsedTab {
-            sections_found: 3,
+            layout_ok: true,
             rows: rows
                 .into_iter()
                 .map(|(section, key, snapshot)| ParsedRow {
                     section,
                     key: key.map(str::to_string),
                     snapshot,
+                    cancelled: false,
                 })
                 .collect(),
         }
@@ -251,7 +259,14 @@ mod tests {
         let tab = MonthTab {
             month: chrono::NaiveDate::from_ymd_opt(2030, 5, 1).unwrap(),
             rows: Vec::new(),
-            category_actuals: Vec::new(),
+            installments: Vec::new(),
+            debit: crate::planning_sheet::EnvelopeBlock {
+                title: String::new(),
+                planned: Decimal::ZERO,
+                actual: Decimal::ZERO,
+                lines: Vec::new(),
+            },
+            envelopes: Vec::new(),
         };
         let entries = manifest_entries(&tab);
         assert_eq!(managed_tabs(&entries), [TAB.to_string()].into());
@@ -386,13 +401,30 @@ mod tests {
     fn broken_layout_ignores_the_whole_tab() {
         let manifest = vec![entry("rent", Section::Expenses, snap("Aluguel", 5000))];
         let mut tab = parsed(Vec::new());
-        tab.sections_found = 2;
+        tab.layout_ok = false;
         let diff = diff_tab(TAB, &tab, &manifest);
         assert!(
             diff.edits.is_empty(),
             "no Remove for rows hidden by a broken layout"
         );
         assert_eq!(diff.warnings.len(), 1);
+    }
+
+    #[test]
+    fn cancelado_removes_the_row() {
+        let manifest = vec![entry("rent", Section::Expenses, snap("Aluguel", 5000))];
+        let mut tab = parsed(vec![(
+            Section::Expenses,
+            Some("rent"),
+            snap("Aluguel", 5000),
+        )]);
+        tab.rows[0].cancelled = true;
+        assert_eq!(
+            diff_tab(TAB, &tab, &manifest).edits,
+            vec![SheetEdit::Remove {
+                key: "rent".to_string()
+            }]
+        );
     }
 
     #[test]
