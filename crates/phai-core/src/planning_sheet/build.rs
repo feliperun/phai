@@ -260,8 +260,16 @@ fn summarize(title: String, planned: Decimal, purchases: &[&TransactionRecord]) 
     }
 }
 
+/// A purchase's name as it fits in a block. Raw bank lines read
+/// `Transferência enviada|Fulano`: the part after the bar names who was paid.
 fn short(text: &str) -> String {
-    let main = text.split('|').next().unwrap_or(text).trim();
+    let main = text
+        .split_once('|')
+        .map(|(_, who)| who)
+        .filter(|who| !who.trim().is_empty())
+        .unwrap_or(text)
+        .trim()
+        .trim_end_matches('|');
     if main.chars().count() <= LINE_WIDTH {
         main.to_string()
     } else {
@@ -739,7 +747,11 @@ mod tests {
 
     #[test]
     fn long_descriptions_are_cut_to_fit_the_block() {
-        assert_eq!(short("Padaria|extra"), "Padaria");
+        assert_eq!(
+            short("Pagamento efetuado|Companhia de Luz"),
+            "Companhia de Luz"
+        );
+        assert_eq!(short("Padaria|"), "Padaria");
         assert_eq!(
             short("Supermercado Muito Grande Ltda"),
             "Supermercado Muito Gr…"

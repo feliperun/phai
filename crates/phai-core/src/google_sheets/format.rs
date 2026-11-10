@@ -229,12 +229,20 @@ fn condition(validation: Validation) -> (Value, bool) {
     }
 }
 
+/// Undo the previous layout's merges and dropdowns: sent before the values,
+/// since a merged cell drops what is written into it.
+pub(super) fn reset_requests(sheet_id: i64, _month: &MonthFormat) -> Vec<Value> {
+    let whole = json!({"sheetId": sheet_id});
+    vec![
+        json!({"unmergeCells": {"range": whole}}),
+        json!({"setDataValidation": {"range": whole}}),
+    ]
+}
+
 pub(super) fn month_requests(sheet_id: i64, month: &MonthFormat) -> Vec<Value> {
     let whole = json!({"sheetId": sheet_id});
     let mut requests = vec![
-        json!({"unmergeCells": {"range": whole}}),
         json!({"repeatCell": {"range": whole, "cell": {"userEnteredFormat": {}}, "fields": "userEnteredFormat"}}),
-        json!({"setDataValidation": {"range": whole}}),
         json!({"repeatCell": {"range": whole,
             "cell": {"userEnteredFormat": {"textFormat": {"fontFamily": "Roboto", "fontSize": 12}}},
             "fields": "userEnteredFormat.textFormat.fontFamily,userEnteredFormat.textFormat.fontSize"}}),
@@ -277,6 +285,14 @@ mod tests {
     }
 
     #[test]
+    fn the_reset_undoes_merges_and_dropdowns() {
+        assert_eq!(
+            kinds(&reset_requests(7, &MonthFormat::default())),
+            ["unmergeCells", "setDataValidation"]
+        );
+    }
+
+    #[test]
     fn a_sync_clears_the_old_look_before_laying_down_the_new_one() {
         let month = MonthFormat {
             styles: vec![(
@@ -300,11 +316,9 @@ mod tests {
         };
         let requests = month_requests(7, &month);
         assert_eq!(
-            &kinds(&requests)[..8],
+            &kinds(&requests)[..6],
             &[
-                "unmergeCells",
                 "repeatCell",
-                "setDataValidation",
                 "repeatCell",
                 "repeatCell",
                 "mergeCells",
@@ -312,7 +326,7 @@ mod tests {
                 "updateSheetProperties",
             ]
         );
-        let card = &requests[4]["repeatCell"];
+        let card = &requests[2]["repeatCell"];
         assert_eq!(
             card["cell"]["userEnteredFormat"]["backgroundColor"],
             color(PINK)
@@ -321,7 +335,7 @@ mod tests {
             card["fields"],
             "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold"
         );
-        let status = &requests[6]["setDataValidation"]["rule"];
+        let status = &requests[4]["setDataValidation"]["rule"];
         assert_eq!(status["strict"], true);
         assert_eq!(
             status["condition"]["values"][4]["userEnteredValue"],

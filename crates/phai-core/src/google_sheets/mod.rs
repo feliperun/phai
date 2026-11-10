@@ -222,6 +222,14 @@ impl SheetsApi for HttpSheets {
             self.post(":batchUpdate", &json!({"requests": missing}))
                 .await?;
         }
+        let ids = self.sheet_ids().await?;
+        // Merges and strict dropdowns from the previous layout would swallow
+        // or reject the new values, so they go before anything is written.
+        let reset = month_tab_requests(tabs, &ids, format::reset_requests);
+        if !reset.is_empty() {
+            self.post(":batchUpdate", &json!({"requests": reset}))
+                .await?;
+        }
         let ranges: Vec<String> = tabs.iter().map(|t| quoted(&t.title)).collect();
         self.post("/values:batchClear", &json!({"ranges": ranges}))
             .await?;
@@ -234,24 +242,31 @@ impl SheetsApi for HttpSheets {
             &json!({"valueInputOption": "USER_ENTERED", "data": data}),
         )
         .await?;
-        let ids = self.sheet_ids().await?;
-        let requests: Vec<Value> = tabs
-            .iter()
-            .filter_map(|t| {
-                let id = ids.iter().find(|(title, _)| *title == t.title)?.1;
-                match &t.format {
-                    TabFormat::Month(month) => Some(format::month_requests(id, month)),
-                    TabFormat::Plain => None,
-                }
-            })
-            .flatten()
-            .collect();
-        if !requests.is_empty() {
-            self.post(":batchUpdate", &json!({"requests": requests}))
+        let look = month_tab_requests(tabs, &ids, format::month_requests);
+        if !look.is_empty() {
+            self.post(":batchUpdate", &json!({"requests": look}))
                 .await?;
         }
         Ok(())
     }
+}
+
+/// `build`'s requests for every month tab being written.
+fn month_tab_requests(
+    tabs: &[TabWrite],
+    ids: &[(String, i64)],
+    build: fn(i64, &MonthFormat) -> Vec<Value>,
+) -> Vec<Value> {
+    tabs.iter()
+        .filter_map(|t| {
+            let id = ids.iter().find(|(title, _)| *title == t.title)?.1;
+            match &t.format {
+                TabFormat::Month(month) => Some(build(id, month)),
+                TabFormat::Plain => None,
+            }
+        })
+        .flatten()
+        .collect()
 }
 
 fn rows_of(range: Option<&Value>) -> Vec<Vec<Value>> {
@@ -400,6 +415,15 @@ mod tests {
             .and(path(batch.as_str()))
             .and(body_partial_json(
                 json!({"requests": [{"unmergeCells": {"range": {"sheetId": 11}}}]}),
+            ))
+            .respond_with(ok())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(batch.as_str()))
+            .and(body_partial_json(
+                json!({"requests": [{"repeatCell": {"range": {"sheetId": 11}}}]}),
             ))
             .respond_with(ok())
             .expect(1)
