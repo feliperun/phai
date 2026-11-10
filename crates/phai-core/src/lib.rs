@@ -9,6 +9,7 @@ pub mod invite;
 pub mod legacy;
 pub mod migrations;
 pub mod models;
+pub mod planning_sheet;
 pub mod pluggy;
 pub mod rules;
 pub mod scenario;
