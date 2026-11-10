@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.44.0](https://github.com/feliperun/phai/compare/v5.43.0...v5.44.0) (2026-11-10)
+
+
+### Features
+
+* **category:** curated category names that sync leaves alone ([f280a4a](https://github.com/feliperun/phai/commit/f280a4a0e24db491a32eb5caec00be95bb088bac))
+
 ## [5.43.0](https://github.com/feliperun/phai/compare/v5.42.2...v5.43.0) (2026-11-10)
 
 
