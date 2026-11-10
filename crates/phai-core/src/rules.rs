@@ -1,4 +1,5 @@
 use crate::idempotency::category_id;
+use crate::installments::parse_installment_description;
 use crate::models::decimal_from_str;
 use crate::models::RuleRecord;
 use anyhow::{bail, Context, Result};
@@ -13,6 +14,8 @@ pub struct CompiledRule {
     pub category_id: String,
     pub context: Option<String>,
     pub amount_sign: Option<AmountSign>,
+    /// Name the rule gives what it matches (`rotulo` / `set.label`).
+    pub label: Option<String>,
     matcher: RuleMatcher,
     amount_match: Option<Decimal>,
     created_at: DateTime<Utc>,
@@ -38,6 +41,8 @@ pub struct RuleApplication {
     pub category_source: String,
     pub context: Option<String>,
     pub amount_sign: Option<AmountSign>,
+    /// Name for the transaction when the matching rule has one.
+    pub label: Option<String>,
 }
 
 pub fn compile_rules(rows: &[RuleRecord]) -> Result<Vec<CompiledRule>> {
@@ -119,6 +124,7 @@ pub fn apply_rules_with_facts(
             category_source: "rule".to_string(),
             context: rule.context.clone(),
             amount_sign: rule.amount_sign,
+            label: rule.label.clone(),
         };
     }
 
@@ -132,6 +138,7 @@ pub fn apply_rules_with_facts(
         category_source: source.to_string(),
         context: None,
         amount_sign: None,
+        label: None,
     }
 }
 
@@ -299,6 +306,7 @@ fn parse_legacy_context_rule(row: &RuleRecord, value: &Value) -> Result<Option<C
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
     let amount_sign = parse_amount_sign(value.get("amount_sign"))?;
+    let label = optional_text(value.get("rotulo"));
 
     let category_id = category_id(category, subcategory);
     let rule = match match_type {
@@ -330,7 +338,7 @@ fn parse_legacy_context_rule(row: &RuleRecord, value: &Value) -> Result<Option<C
         )?,
     };
 
-    Ok(Some(rule))
+    Ok(Some(CompiledRule { label, ..rule }))
 }
 
 fn parse_legacy_yaml_rule(row: &RuleRecord, value: &Value) -> Result<Option<CompiledRule>> {
@@ -373,6 +381,8 @@ fn parse_legacy_yaml_rule(row: &RuleRecord, value: &Value) -> Result<Option<Comp
             .and_then(|setter| setter.get("amount_sign")),
     )?;
 
+    let label = optional_text(value.get("set").and_then(|setter| setter.get("label")));
+
     build_contains_rule(
         row,
         rule_id,
@@ -382,7 +392,28 @@ fn parse_legacy_yaml_rule(row: &RuleRecord, value: &Value) -> Result<Option<Comp
         None,
         amount_sign,
     )
-    .map(Some)
+    .map(|rule| Some(CompiledRule { label, ..rule }))
+}
+
+fn optional_text(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// The name a rule's label gives a transaction: the label plus the
+/// installment the bank text carries (`3/10`), so each parcel keeps its own.
+pub fn labeled_description(label: &str, raw_description: &str) -> String {
+    let label = label.trim();
+    if parse_installment_description(label).is_some() {
+        return label.to_string();
+    }
+    match parse_installment_description(raw_description) {
+        Some(marker) => format!("{label} {}/{}", marker.current, marker.total),
+        None => label.to_string(),
+    }
 }
 
 fn build_contains_rule(
@@ -410,6 +441,7 @@ fn build_contains_rule(
         category_id,
         context,
         amount_sign,
+        label: None,
         matcher: RuleMatcher::ContainsAny(needles),
         amount_match,
         created_at: row.created_at,
@@ -438,6 +470,7 @@ fn build_exact_rule(
         category_id,
         context,
         amount_sign,
+        label: None,
         matcher: RuleMatcher::Exact(needle),
         amount_match,
         created_at: row.created_at,
@@ -464,6 +497,7 @@ fn build_transaction_id_rule(
         category_id,
         context,
         amount_sign,
+        label: None,
         matcher: RuleMatcher::TransactionIdExact(transaction_id),
         amount_match: None,
         created_at: row.created_at,
@@ -779,5 +813,55 @@ mod tests {
         );
 
         assert_eq!(result.amount_sign, Some(AmountSign::Positive));
+    }
+
+    fn label_for(body: &str, text: &str) -> Option<String> {
+        let compiled = compile_rules(&[rule("labeled", body)]).unwrap();
+        apply_rules_with_facts(text, None, None, None, false, &compiled).label
+    }
+
+    #[test]
+    fn context_rule_rotulo_names_what_it_matches() {
+        let body = r#"{"match_type":"descricao_contains","match_value":"joana souza","categoria":"Moradia","subcategoria":"Servicos","rotulo":"Faxina semanal"}"#;
+        assert_eq!(
+            label_for(body, "Pix enviado|JOANA SOUZA").as_deref(),
+            Some("Faxina semanal")
+        );
+    }
+
+    #[test]
+    fn yaml_rule_label_comes_from_set_label() {
+        let body = r#"{"id":"x","match":{"contains_any":["oficina beta"]},"set":{"category":"Transporte","subcategory":"Manutencao","label":"Revisão do carro"}}"#;
+        assert_eq!(
+            label_for(body, "OFICINA BETA LTDA").as_deref(),
+            Some("Revisão do carro")
+        );
+    }
+
+    #[test]
+    fn rules_without_a_label_leave_the_name_alone() {
+        let dsl = r#"if description contains "mercado" then category alimentacao:mercado"#;
+        assert_eq!(label_for(dsl, "Mercado X"), None);
+        let blank = r#"{"match_type":"descricao_contains","match_value":"mercado","categoria":"Mercado","rotulo":"  "}"#;
+        assert_eq!(label_for(blank, "Mercado X"), None);
+        let other = r#"{"match_type":"descricao_contains","match_value":"padaria","categoria":"Mercado","rotulo":"Pão"}"#;
+        assert_eq!(label_for(other, "Mercado X"), None);
+    }
+
+    #[test]
+    fn labeled_description_keeps_the_installment_of_the_raw_text() {
+        assert_eq!(
+            labeled_description("Curso de bordado", "HTM*ATELIE X 8/12"),
+            "Curso de bordado 8/12"
+        );
+        assert_eq!(
+            labeled_description("Curso de bordado", "Atelie X - Parcela 3 de 10"),
+            "Curso de bordado 3/10"
+        );
+        assert_eq!(
+            labeled_description("Mensalidade", "Pix enviado|ESCOLA"),
+            "Mensalidade"
+        );
+        assert_eq!(labeled_description("Sofá 2/10", "LOJA 2/10"), "Sofá 2/10");
     }
 }

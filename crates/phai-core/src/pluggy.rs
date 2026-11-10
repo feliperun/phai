@@ -6,7 +6,7 @@ use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
 };
-use crate::rules::{apply_rules_with_facts, AmountSign, CompiledRule};
+use crate::rules::{apply_rules_with_facts, labeled_description, AmountSign, CompiledRule};
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use reqwest::Client;
@@ -547,6 +547,9 @@ fn build_transaction_record(
     let category_id = rule_application.category_id;
     let category_source = rule_application.category_source;
     let context = rule_application.context;
+    let description = rule_application
+        .label
+        .map(|label| labeled_description(&label, &raw_description));
     let transaction_date = parse_date(&payload.date)?;
 
     // Pluggy returns credit-card debits with positive amounts (debt added to card),
@@ -601,7 +604,7 @@ fn build_transaction_record(
             .or_else(|| Some(binding.id.clone())),
         transaction_date,
         raw_description,
-        description: None,
+        description,
         merchant_name: None,
         purpose: None,
         amount,
@@ -1782,6 +1785,44 @@ mod tests {
         assert_eq!(tx.category_id.as_deref(), Some("receitas:salario"));
         assert_eq!(tx.category_source, "rule");
         assert_eq!(tx.raw_description, "Transferência Recebida");
+    }
+
+    #[test]
+    fn rule_label_names_the_synced_transaction() {
+        let binding = binding("cc_acc", "pluggy-cc", None);
+        let registry = checking_registry_entry();
+        let payload: PluggyTransactionPayload = serde_json::from_value(json!({
+            "id": "tx-labeled-1",
+            "accountId": "pluggy-cc",
+            "date": "2026-10-07",
+            "description": "Transferência enviada pelo Pix|JOANA SOUZA",
+            "amount": -350.00,
+            "type": "DEBIT",
+            "status": "POSTED"
+        }))
+        .expect("deserialise payload");
+        let rules = crate::rules::compile_rules(&[dsl_rule(
+            "context:faxina",
+            r#"{"match_type":"descricao_contains","match_value":"joana souza","categoria":"Moradia","subcategoria":"Servicos","rotulo":"Faxina semanal"}"#,
+        )])
+        .unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding,
+            Some(&registry),
+            "test-actor",
+            &rules,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.description.as_deref(), Some("Faxina semanal"));
+        assert_eq!(tx.category_id.as_deref(), Some("moradia:servicos"));
+        assert_eq!(
+            tx.raw_description,
+            "Transferência enviada pelo Pix|JOANA SOUZA"
+        );
     }
 
     #[test]
