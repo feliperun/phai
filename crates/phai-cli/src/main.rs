@@ -2566,41 +2566,7 @@ fn detect_installment_marker(row: &CardClosedTransactionRow) -> Option<String> {
         })
 }
 
-/// Returns the description enriched with an installment marker sourced from
-/// Pluggy metadata when the stored description text lacks one. Used to make
-/// `report installments` work with data synced before the Pluggy fix landed.
-pub(crate) fn enrich_description_from_metadata(description: &str, metadata: &Value) -> String {
-    if phai_core::installments::parse_installment_description(description).is_some() {
-        return description.to_string();
-    }
-    // Try descriptionRaw first.
-    if let Some(raw) = metadata
-        .get("raw")
-        .and_then(|r| r.get("descriptionRaw"))
-        .and_then(|v| v.as_str())
-        .filter(|s| phai_core::installments::parse_installment_description(s).is_some())
-    {
-        return raw.to_string();
-    }
-    // Fall back to creditCardMetadata structured fields.
-    if let (Some(current), Some(total)) = (
-        metadata
-            .get("raw")
-            .and_then(|r| r.get("creditCardMetadata"))
-            .and_then(|m| m.get("installmentNumber"))
-            .and_then(|v| v.as_u64()),
-        metadata
-            .get("raw")
-            .and_then(|r| r.get("creditCardMetadata"))
-            .and_then(|m| m.get("totalInstallments"))
-            .and_then(|v| v.as_u64()),
-    ) {
-        if current > 0 && total > 0 && current <= total && total <= 99 {
-            return format!("{} {}/{}", description.trim(), current, total);
-        }
-    }
-    description.to_string()
-}
+pub(crate) use phai_core::installments::enrich_description_from_metadata;
 
 fn is_subscription_row(row: &CardClosedTransactionRow) -> bool {
     if row

@@ -2,7 +2,45 @@ use crate::models::TransactionRecord;
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// Returns the description enriched with an installment marker sourced from
+/// Pluggy metadata when the stored description text lacks one. Used to make
+/// `report installments` work with data synced before the Pluggy fix landed,
+/// and lets a rule label keep the installment of a card purchase.
+pub fn enrich_description_from_metadata(description: &str, metadata: &Value) -> String {
+    if parse_installment_description(description).is_some() {
+        return description.to_string();
+    }
+    // Try descriptionRaw first.
+    if let Some(raw) = metadata
+        .get("raw")
+        .and_then(|r| r.get("descriptionRaw"))
+        .and_then(|v| v.as_str())
+        .filter(|s| parse_installment_description(s).is_some())
+    {
+        return raw.to_string();
+    }
+    // Fall back to creditCardMetadata structured fields.
+    if let (Some(current), Some(total)) = (
+        metadata
+            .get("raw")
+            .and_then(|r| r.get("creditCardMetadata"))
+            .and_then(|m| m.get("installmentNumber"))
+            .and_then(|v| v.as_u64()),
+        metadata
+            .get("raw")
+            .and_then(|r| r.get("creditCardMetadata"))
+            .and_then(|m| m.get("totalInstallments"))
+            .and_then(|v| v.as_u64()),
+    ) {
+        if current > 0 && total > 0 && current <= total && total <= 99 {
+            return format!("{} {}/{}", description.trim(), current, total);
+        }
+    }
+    description.to_string()
+}
 
 /// Identifies an installment marker in a transaction description.
 #[derive(Debug, Clone, PartialEq, Eq)]
