@@ -2,6 +2,7 @@ use crate::category_aliases::pluggy_category_alias;
 use crate::idempotency::{
     account_idempotency, category_id, pluggy_transaction_natural_idempotency,
 };
+use crate::installments::enrich_description_from_metadata;
 use crate::legacy::{load_account_registry, AccountRegistryEntry};
 use crate::models::{
     json_object_or_empty, parse_datetime_or_now, AccountRecord, TransactionRecord,
@@ -547,9 +548,7 @@ fn build_transaction_record(
     let category_id = rule_application.category_id;
     let category_source = rule_application.category_source;
     let context = rule_application.context;
-    let description = rule_application
-        .label
-        .map(|label| labeled_description(&label, &raw_description));
+    let label = rule_application.label;
     let transaction_date = parse_date(&payload.date)?;
 
     // Pluggy returns credit-card debits with positive amounts (debt added to card),
@@ -604,7 +603,7 @@ fn build_transaction_record(
             .or_else(|| Some(binding.id.clone())),
         transaction_date,
         raw_description,
-        description,
+        description: None,
         merchant_name: None,
         purpose: None,
         amount,
@@ -633,6 +632,10 @@ fn build_transaction_record(
         enrichment_attempted_at: None,
         amount_cents: None,
     };
+    record.description = label.map(|label| {
+        let text = enrich_description_from_metadata(&record.raw_description, &record.metadata_json);
+        labeled_description(&label, &text)
+    });
     record.idempotency_key = pluggy_transaction_natural_idempotency(&record)?;
     Ok(record)
 }
@@ -1823,6 +1826,38 @@ mod tests {
             tx.raw_description,
             "Transferência enviada pelo Pix|JOANA SOUZA"
         );
+    }
+
+    #[test]
+    fn rule_label_keeps_the_installment_card_metadata_carries() {
+        let payload: PluggyTransactionPayload = serde_json::from_value(json!({
+            "id": "tx-labeled-2",
+            "accountId": "pluggy-cc",
+            "date": "2026-10-05",
+            "description": "Oficina Beta",
+            "amount": 120.00,
+            "type": "debit",
+            "status": "posted",
+            "creditCardMetadata": { "installmentNumber": 5, "totalInstallments": 5 }
+        }))
+        .expect("deserialise payload");
+        let rules = crate::rules::compile_rules(&[dsl_rule(
+            "oficina",
+            r#"{"id":"oficina","match":{"contains_any":["oficina beta"]},"set":{"category":"Transporte","label":"Revisão do carro"}}"#,
+        )])
+        .unwrap();
+
+        let tx = build_transaction_record(
+            payload,
+            &binding("cc_acc", "pluggy-cc", None),
+            Some(&credit_registry_entry(None)),
+            "test-actor",
+            &rules,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(tx.description.as_deref(), Some("Revisão do carro 5/5"));
     }
 
     #[test]
