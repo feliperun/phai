@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.45.0](https://github.com/feliperun/phai/compare/v5.44.0...v5.45.0) (2026-11-11)
+
+
+### Features
+
+* **admin:** relabel names past transactions from their rule's label ([89d8e07](https://github.com/feliperun/phai/commit/89d8e0708fd5e6ec6b52728394af2a3068996d2b))
+* **rules:** rule labels name the transactions they match ([e16d600](https://github.com/feliperun/phai/commit/e16d600a859c43bdec0805c86fa3670ccfa3bc9b))
+
+
+### Bug Fixes
+
+* **rules:** a labeled card installment keeps the parcel from Pluggy metadata ([a0066d1](https://github.com/feliperun/phai/commit/a0066d147ddb0623a397cd1f3cfadad14205dd0d))
+
 ## [5.44.0](https://github.com/feliperun/phai/compare/v5.43.0...v5.44.0) (2026-11-10)
 
 
