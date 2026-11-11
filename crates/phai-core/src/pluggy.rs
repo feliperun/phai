@@ -478,7 +478,11 @@ fn normalize_pluggy_category(slug: &str) -> &str {
 /// in `paymentData`. Appending it in the same `|name` shape lets rules written
 /// for the named form also catch the bare one. The counterpart is the payer on
 /// credits and the receiver on debits, never the account owner.
-fn rule_match_text(raw_description: &str, payment_data: Option<&Value>, is_credit: bool) -> String {
+pub fn rule_match_text(
+    raw_description: &str,
+    payment_data: Option<&Value>,
+    is_credit: bool,
+) -> String {
     if raw_description.contains('|') {
         return raw_description.to_string();
     }

@@ -7343,3 +7343,100 @@ fn sync_names_new_installment_from_named_sibling() {
         "Parcelas preenchidas a partir da mesma compra: 0",
     ));
 }
+
+fn description_of(data_dir: &Path, transaction_id: &str) -> Option<String> {
+    let conn = Connection::open(data_dir.join("phai.local.db")).expect("open db");
+    conn.query_row(
+        "SELECT description FROM transactions WHERE transaction_id = ?1",
+        [transaction_id],
+        |row| row.get(0),
+    )
+    .expect("transaction row")
+}
+
+#[test]
+fn admin_relabel_names_past_transactions_from_rule_labels() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let data_dir = temp.path().join("data");
+    setup_local_auth_migrate(&config_dir, &data_dir);
+    seed_fixture_sync(&temp, &config_dir, &data_dir);
+
+    // A name a person typed must survive.
+    envs(
+        cargo_bin().args([
+            "tx",
+            "set-anatomy",
+            "--transaction-id",
+            "pluggy-fixture-003",
+            "--description",
+            "Gasolina da viagem",
+        ]),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    for (rule_id, needle, category, label) in [
+        (
+            "context:angeloni",
+            "angeloni",
+            "Mercado",
+            "Mercado do bairro",
+        ),
+        (
+            "context:posto",
+            "posto de gasolina",
+            "Transporte",
+            "Combustível",
+        ),
+    ] {
+        let body = format!(
+            r#"{{"match_type":"descricao_contains","match_value":"{needle}","categoria":"{category}","rotulo":"{label}"}}"#
+        );
+        envs(
+            cargo_bin().args(["rule", "upsert", "--rule-id", rule_id, "--body", &body]),
+            &config_dir,
+            &data_dir,
+        )
+        .assert()
+        .success();
+    }
+
+    envs(
+        cargo_bin().args(["admin", "relabel", "--dry-run"]),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Mercado do bairro"))
+    .stdout(predicate::str::contains("1 lançamento(s)"));
+    assert_eq!(description_of(&data_dir, "pluggy-fixture-001"), None);
+
+    envs(
+        cargo_bin().args(["admin", "relabel"]),
+        &config_dir,
+        &data_dir,
+    )
+    .assert()
+    .success();
+    assert_eq!(
+        description_of(&data_dir, "pluggy-fixture-001").as_deref(),
+        Some("Mercado do bairro")
+    );
+    assert_eq!(
+        description_of(&data_dir, "pluggy-fixture-003").as_deref(),
+        Some("Gasolina da viagem")
+    );
+    let conn = Connection::open(data_dir.join("phai.local.db")).expect("open db");
+    let audits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log
+             WHERE entity_id = 'pluggy-fixture-001' AND action = 'transaction.relabel'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("audit count");
+    assert_eq!(audits, 1);
+}
