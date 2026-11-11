@@ -163,6 +163,8 @@ Adding a new report:
 
 `rules.rs` defines `RuleRecord` and the matching algorithm: ordered, first-match-wins, with conditions on `raw_description`, account, amount range, and date range. Rules are runtime data, not code — the only path to add personal classification logic.
 
+A rule can also name what it matches: `rotulo` on context rules, `set.label` on `match`/`set` rules. The sync writes that label (plus the row's own installment, `Curso 8/12`) as the `description` of a transaction that has none, so a counterparty named once keeps its name on every new Pix. A description already stored always wins. `phai admin relabel` fills transactions synced before the label existed.
+
 **Never** hardcode a counterparty pattern in `enrichment/heuristics.rs` or in a migration. If it's specific to one user's bank statement, it goes in the `rules` table on that user's machine.
 
 ## Enrichment Pipeline

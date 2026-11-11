@@ -41,6 +41,7 @@ mod mcp;
 mod planning_sheet_apply;
 mod planning_sheet_cmd;
 mod pulse;
+mod relabel_cmd;
 mod scenario_cmd;
 mod self_cmd;
 mod serve;
@@ -273,6 +274,9 @@ enum AdminCommand {
     Migrate,
     ImportLegacy(ImportLegacyArgs),
     Reclassify(ReclassifyArgs),
+    /// Name past transactions without a description from the label
+    /// (`rotulo`, `set.label`) of the rule they match.
+    Relabel(relabel_cmd::RelabelArgs),
 }
 
 #[derive(Args)]
@@ -3404,6 +3408,7 @@ async fn run_admin(command: AdminCommand) -> Result<()> {
         AdminCommand::Migrate => admin_migrate().await,
         AdminCommand::ImportLegacy(args) => admin_import_legacy(args).await,
         AdminCommand::Reclassify(args) => admin_reclassify(args).await,
+        AdminCommand::Relabel(args) => relabel_cmd::run(args).await,
     }
 }
 

@@ -192,6 +192,7 @@ phai auth setup              Configure backend and credentials
 phai invite create           Mint an encrypted activation invite for another machine (ADR-0034)
 phai admin migrate           Apply pending database migrations
 phai admin import-legacy     Import from legacy CSV files
+phai admin relabel           Name past transactions without a description from their rule's label (--dry-run first)
 phai sync pluggy             Sync transactions from Pluggy
 phai report <subcommand>     See "Reports" above
 phai serve                   Start the web app — the interactive surface for review and forecasts
